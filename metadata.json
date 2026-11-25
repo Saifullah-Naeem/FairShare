@@ -1,0 +1,6 @@
+{
+  "name": "FairShare Ledger",
+  "description": "Mobile-first hostel and roommate expense ledger in PKR paisa minor units with shadow member claims, partial settlement confirmations, and an append-only audit trail.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

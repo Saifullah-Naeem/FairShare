@@ -1,0 +1,31 @@
+1. Concept, Stack & Scope
+What it is: A lightweight, mobile-first web app (FairShare Ledger) for hostel, roommate, and university group expense splitting.
+
+Tech Stack: Python, built-in SQLite, and vanilla HTML/CSS/JS—runs locally or over local Wi-Fi/LAN with minimal setup.
+
+Scope Boundaries: Portfolio/concept app only. No real-money processing, no paid SMS/email gateways, and a clear Demo Environment warning in the UI and README.md.
+
+2. Core Features & Ledger Rules
+Exact Money Integrity: All currency stored and calculated in integer minor units (no floats); active expense splits must strictly equal the total amount.
+
+Shadow ("Ghost") Members: Add unregistered friends by name with a single-use claim token; claiming links their account, preserves past splits, and locks out takeovers.
+
+Partial Payments & Confirmations: Support partial settlements with explicit states (PENDING_CONFIRMATION, CONFIRMED, REJECTED with reason, CANCELLED). Only confirmed settlements reduce balances; voided expenses stay visible in history.
+
+Balances & Audit Trail: Calculate zero-sum net balances, provide a simplified debt-settlement plan alongside raw pair balances, and record all actions in an append-only audit log.
+
+Non-Spam Reminders: Support quiet hours, cooldowns/snooze, and batched summary reminders.
+
+3. Verification, Roles & Testing Helpers
+Pluggable Verification: A base interface with a Dev Mock Provider (shows expiring codes/tokens in console and a UI dev banner) and a Production Stub for future SMS/email integration.
+
+Permissions & Proofs: Enforce role checks (HOST, ADMIN, MEMBER, and expense payer) on confirmations and voids; allow optional payment notes and local receipt uploads.
+
+One-Click Demo Reset: A seed/reset script and UI button to wipe and reload realistic test data instantly.
+
+4. Deliverables
+Backend: Modular Python + SQLite app (7 core tables), unittest suite, .env.example, and demo seeder.
+
+Mobile-First UI: 6 phone-friendly screens—Group Overview, Net Balances & Simplified Plan, Add/Split Expense (equal & custom), Partial Payment & Confirmation Queue, Shadow Member Invite/Claim, and Transaction/Audit History.
+
+Documentation: README.md covering the problem, local/LAN quick-start, ledger rules, and key engineering trade-offs.
