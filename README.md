@@ -1,5 +1,4 @@
-<img width="371" height="666" alt="image" src="https://github.com/user-attachments/assets/68b13eb5-cdeb-4275-90e2-5acfbc54f9e0" />
-
+<img width="2752" height="1536" alt="FairShare" src="https://github.com/user-attachments/assets/8804b8e5-749f-438e-9a97-504a2285149f" />
 
 
 
