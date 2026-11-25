@@ -15,6 +15,7 @@ import {
   formatSettlementStatus,
   formatTimestamp,
 } from '../../utils/currency';
+import { ReceiptPreviewModal } from '../ReceiptPreviewModal';
 
 interface SettlementsQueueScreenProps {
   state: LedgerState;
@@ -62,6 +63,7 @@ export const SettlementsQueueScreen: React.FC<SettlementsQueueScreenProps> = ({
   const [rejectingId, setRejectingId] = useState<number | null>(null);
   const [rejectReason, setRejectReason] = useState('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [previewReceiptPath, setPreviewReceiptPath] = useState<string | null>(null);
 
   useEffect(() => {
     if (prefilledEdge) {
@@ -332,15 +334,14 @@ export const SettlementsQueueScreen: React.FC<SettlementsQueueScreenProps> = ({
                     )}
 
                     {st.receiptPath && (
-                      <a
-                        href={st.receiptPath}
-                        target="_blank"
-                        rel="noreferrer"
-                        className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700 hover:text-emerald-600"
+                      <button
+                        type="button"
+                        onClick={() => setPreviewReceiptPath(st.receiptPath)}
+                        className="inline-flex items-center gap-1.5 min-h-[36px] text-xs font-semibold text-emerald-700 hover:text-emerald-600"
                       >
                         <Paperclip className="w-3.5 h-3.5" />
                         <span>View Receipt</span>
-                      </a>
+                      </button>
                     )}
 
                     {rejectingId === st.id ? (
@@ -470,15 +471,14 @@ export const SettlementsQueueScreen: React.FC<SettlementsQueueScreenProps> = ({
                     </p>
                   )}
                   {st.receiptPath && (
-                    <a
-                      href={st.receiptPath}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700 hover:text-emerald-600"
+                    <button
+                      type="button"
+                      onClick={() => setPreviewReceiptPath(st.receiptPath)}
+                      className="inline-flex items-center gap-1.5 min-h-[36px] text-xs font-semibold text-emerald-700 hover:text-emerald-600"
                     >
                       <Paperclip className="w-3.5 h-3.5" />
                       <span>View Receipt</span>
-                    </a>
+                    </button>
                   )}
                 </div>
               ))}
@@ -486,6 +486,11 @@ export const SettlementsQueueScreen: React.FC<SettlementsQueueScreenProps> = ({
           )}
         </section>
       </div>
+
+      <ReceiptPreviewModal
+        receiptPath={previewReceiptPath}
+        onClose={() => setPreviewReceiptPath(null)}
+      />
     </div>
   );
 };

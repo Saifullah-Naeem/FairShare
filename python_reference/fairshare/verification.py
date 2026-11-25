@@ -1,4 +1,4 @@
-"""Pluggable verification provider interface with Dev Mock and Production Stub implementations."""
+"""Pluggable verification provider interface with local and external-gateway stub implementations."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ class VerificationProvider(ABC):
 
 
 class DevMockVerificationProvider(VerificationProvider):
-    """Development provider that prints expiring tokens/codes to console and keeps an inspectable list."""
+    """Local verification provider that keeps expiring codes in memory without printing secrets to stdout."""
 
     def __init__(self) -> None:
         self._tokens: Dict[str, VerificationToken] = {}
@@ -65,12 +65,10 @@ class DevMockVerificationProvider(VerificationProvider):
             detail=detail,
         )
         self._tokens[raw_token] = record
-        print(f"[DEV MOCK VERIFICATION] {purpose} -> {recipient_label} | Token: {raw_token} | Expires: {expires_at}")
         return record
 
     def send_batch_summary(self, recipient_label: str, summary_text: str) -> Dict[str, str]:
-        print(f"[DEV MOCK REMINDER] To: {recipient_label} | {summary_text}")
-        return {"channel": "dev_mock_console", "status": "logged"}
+        return {"channel": "in_app_summary", "status": "prepared"}
 
     def get_active_tokens(self) -> List[VerificationToken]:
         now = datetime.now(timezone.utc)
@@ -87,7 +85,7 @@ class DevMockVerificationProvider(VerificationProvider):
 
 
 class ProductionStubVerificationProvider(VerificationProvider):
-    """Production stub reserving the interface for SMS/email gateways."""
+    """Stub reserving the interface for external SMS/email gateways."""
 
     def issue_token(
         self,
@@ -98,12 +96,12 @@ class ProductionStubVerificationProvider(VerificationProvider):
         fixed_token: Optional[str] = None,
     ) -> VerificationToken:
         raise NotImplementedError(
-            "Production SMS/Email gateway is intentionally stubbed in this portfolio demo."
+            "External SMS/Email gateway is not configured."
         )
 
     def send_batch_summary(self, recipient_label: str, summary_text: str) -> Dict[str, str]:
         raise NotImplementedError(
-            "Production SMS/Email gateway is not configured in this concept demo."
+            "External SMS/Email gateway is not configured."
         )
 
     def get_active_tokens(self) -> List[VerificationToken]:

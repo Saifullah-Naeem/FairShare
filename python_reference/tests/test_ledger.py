@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
+import secrets
+import sqlite3
 import unittest
 
 from fairshare.db import (
@@ -12,8 +14,8 @@ from fairshare.db import (
     create_expense,
     create_settlement,
     dispatch_batched_reminders,
+    hash_password,
     invite_shadow_member,
-    seed_demo_data,
     void_expense,
 )
 from fairshare.ledger import (
@@ -27,11 +29,81 @@ from fairshare.ledger import (
 from fairshare.verification import DevMockVerificationProvider, ProductionStubVerificationProvider
 
 
+def _create_test_fixture(
+    conn: sqlite3.Connection, verification: DevMockVerificationProvider
+) -> dict[str, int | str]:
+    ts = datetime.now(timezone.utc).isoformat()
+    pw = hash_password(secrets.token_urlsafe(16))
+    with conn:
+        hamza_u = int(
+            conn.execute(
+                "INSERT INTO users (name, handle, password_hash, is_shadow, claimed_at, created_at) VALUES (?, ?, ?, 0, ?, ?)",
+                ("Hamza Tariq", "hamza", pw, ts, ts),
+            ).lastrowid
+        )
+        ayesha_u = int(
+            conn.execute(
+                "INSERT INTO users (name, handle, password_hash, is_shadow, claimed_at, created_at) VALUES (?, ?, ?, 0, ?, ?)",
+                ("Ayesha Khan", "ayesha", pw, ts, ts),
+            ).lastrowid
+        )
+        saad_u = int(
+            conn.execute(
+                "INSERT INTO users (name, handle, password_hash, is_shadow, claimed_at, created_at) VALUES (?, ?, ?, 0, ?, ?)",
+                ("Saad Mahmood", "saad", pw, ts, ts),
+            ).lastrowid
+        )
+        group_id = int(
+            conn.execute(
+                "INSERT INTO groups (name, currency_code, quiet_hours_start, quiet_hours_end, reminder_cooldown_hours, created_by_user_id, created_at) VALUES (?, 'PKR', 22, 8, 12, ?, ?)",
+                ("Hostel Wing B", hamza_u, ts),
+            ).lastrowid
+        )
+        hamza_m = int(
+            conn.execute(
+                "INSERT INTO group_members (group_id, user_id, role, joined_at) VALUES (?, ?, 'HOST', ?)",
+                (group_id, hamza_u, ts),
+            ).lastrowid
+        )
+        ayesha_m = int(
+            conn.execute(
+                "INSERT INTO group_members (group_id, user_id, role, joined_at) VALUES (?, ?, 'ADMIN', ?)",
+                (group_id, ayesha_u, ts),
+            ).lastrowid
+        )
+        saad_m = int(
+            conn.execute(
+                "INSERT INTO group_members (group_id, user_id, role, joined_at) VALUES (?, ?, 'MEMBER', ?)",
+                (group_id, saad_u, ts),
+            ).lastrowid
+        )
+
+    bilal_m, bilal_token = invite_shadow_member(conn, hamza_m, "Bilal Ahmed", verification)
+    create_expense(
+        conn,
+        hamza_m,
+        hamza_m,
+        "PTCL Fiber Wi-Fi Monthly Bill",
+        "Bills",
+        450000,
+        "EQUAL",
+        participant_member_ids=[hamza_m, ayesha_m, saad_m, bilal_m],
+    )
+    return {
+        "group_id": group_id,
+        "host_member_id": hamza_m,
+        "admin_member_id": ayesha_m,
+        "member_id": saad_m,
+        "shadow_member_id": bilal_m,
+        "shadow_token": bilal_token,
+    }
+
+
 class FairShareLedgerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.conn = connect(":memory:")
         self.verification = DevMockVerificationProvider()
-        self.seed = seed_demo_data(self.conn, self.verification)
+        self.seed = _create_test_fixture(self.conn, self.verification)
 
     def tearDown(self) -> None:
         self.conn.close()
@@ -53,8 +125,9 @@ class FairShareLedgerTests(unittest.TestCase):
         shadow_id = int(self.seed["shadow_member_id"])
         token = str(self.seed["shadow_token"])
 
-        # Claim once succeeds and preserves member_id & past PTCL Wi-Fi split
-        claimed_id = claim_shadow_member(self.conn, token, "bilal_hostel", "pass1234")
+        claimed_id = claim_shadow_member(
+            self.conn, token, "bilal_hostel", secrets.token_urlsafe(12)
+        )
         self.assertEqual(claimed_id, shadow_id)
 
         user_row = self.conn.execute(
@@ -63,22 +136,20 @@ class FairShareLedgerTests(unittest.TestCase):
         self.assertEqual(user_row["is_shadow"], 0)
         self.assertIsNone(user_row["claim_token_hash"])
 
-        # Takeover attempt with the same single-use token is rejected
         with self.assertRaises(ValueError):
-            claim_shadow_member(self.conn, token, "attacker", "hack1234")
+            claim_shadow_member(
+                self.conn, token, "attacker", secrets.token_urlsafe(12)
+            )
 
     def test_partial_settlements_and_void_rules(self) -> None:
         host = int(self.seed["host_member_id"])
         member = int(self.seed["member_id"])
 
-        # Saad owes Hamza Rs. 1,125.00 (112,500 paisa) from seeded PTCL Wi-Fi (450,000 / 4)
         st_id = create_settlement(self.conn, member, host, 50000, note="JazzCash partial")
 
-        # Sender cannot self-confirm
         with self.assertRaises(PermissionError):
             act_on_settlement(self.conn, member, st_id, "CONFIRMED")
 
-        # Pending settlement does NOT reduce net balance yet
         exps = [dict(r) for r in self.conn.execute("SELECT * FROM expenses").fetchall()]
         sps = [dict(r) for r in self.conn.execute("SELECT * FROM expense_splits").fetchall()]
         sts = [dict(r) for r in self.conn.execute("SELECT * FROM settlements").fetchall()]
@@ -87,36 +158,39 @@ class FairShareLedgerTests(unittest.TestCase):
         self.assertEqual(before.net_balances[member], -112500)
         self.assertEqual(before.zero_sum_check, 0)
 
-        # Host confirms -> balance drops from -112,500 to -62,500
         act_on_settlement(self.conn, host, st_id, "CONFIRMED")
         sts_after = [dict(r) for r in self.conn.execute("SELECT * FROM settlements").fetchall()]
         after = compute_balances(m_ids, exps, sps, sts_after)
         self.assertEqual(after.net_balances[member], -62500)
         self.assertEqual(after.zero_sum_check, 0)
 
-        # Member cannot void Host's expense, Host can void with reason, stays visible in DB
         exp_id = exps[0]["id"]
         with self.assertRaises(PermissionError):
             void_expense(self.conn, member, exp_id, "Trying unauthorized void")
         void_expense(self.conn, host, exp_id, "Billed next month instead")
-        voided_row = self.conn.execute("SELECT status, void_reason FROM expenses WHERE id = ?", (exp_id,)).fetchone()
+        voided_row = self.conn.execute(
+            "SELECT status, void_reason FROM expenses WHERE id = ?", (exp_id,)
+        ).fetchone()
         self.assertEqual(voided_row["status"], "VOIDED")
 
     def test_non_spam_reminders_and_production_stub(self) -> None:
         host = int(self.seed["host_member_id"])
         group_id = int(self.seed["group_id"])
 
-        # Quiet hours 22:00-08:00 suppress at 23:00
-        suppressed = dispatch_batched_reminders(self.conn, group_id, host, self.verification, override_hour=23)
+        suppressed = dispatch_batched_reminders(
+            self.conn, group_id, host, self.verification, override_hour=23
+        )
         self.assertTrue(all(r["status"] == "SUPPRESSED" for r in suppressed))
 
-        # Daytime 14:00 dispatches once, immediate repeat hits cooldown
-        sent = dispatch_batched_reminders(self.conn, group_id, host, self.verification, override_hour=14)
+        sent = dispatch_batched_reminders(
+            self.conn, group_id, host, self.verification, override_hour=14
+        )
         self.assertTrue(any(r["status"] == "SENT" for r in sent))
-        repeat = dispatch_batched_reminders(self.conn, group_id, host, self.verification, override_hour=14)
+        repeat = dispatch_batched_reminders(
+            self.conn, group_id, host, self.verification, override_hour=14
+        )
         self.assertTrue(all(r["status"] == "SUPPRESSED" for r in repeat))
 
-        # Production stub rejects live SMS/email calls cleanly
         stub = ProductionStubVerificationProvider()
         with self.assertRaises(NotImplementedError):
             invite_shadow_member(self.conn, host, "Zain", stub)

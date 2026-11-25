@@ -1,4 +1,4 @@
-"""Standalone local/LAN HTTP server for the FairShare Ledger Python + SQLite reference."""
+"""Standalone local HTTP server for the FairShare Ledger Python + SQLite reference."""
 
 from __future__ import annotations
 
@@ -6,19 +6,16 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 import json
 import os
 
-from fairshare.db import connect, seed_demo_data
+from fairshare.db import connect
 from fairshare.ledger import compute_balances
-from fairshare.verification import DevMockVerificationProvider
 
 
 DB_PATH = os.environ.get("FAIRSHARE_DB_PATH", "./python_reference/fairshare_ref.db")
-HOST = os.environ.get("FAIRSHARE_HOST", "0.0.0.0")
+HOST = os.environ.get("FAIRSHARE_HOST", "127.0.0.1")
 PORT = int(os.environ.get("FAIRSHARE_PORT", "8080"))
+LOCAL_ADDRS = {"127.0.0.1", "::1", "::ffff:127.0.0.1"}
 
-verification = DevMockVerificationProvider()
 conn = connect(DB_PATH)
-if conn.execute("SELECT COUNT(*) FROM groups").fetchone()[0] == 0:
-    seed_demo_data(conn, verification)
 
 
 class FairShareHandler(BaseHTTPRequestHandler):
@@ -26,6 +23,7 @@ class FairShareHandler(BaseHTTPRequestHandler):
         body = json.dumps(payload).encode("utf-8")
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
+        self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -35,6 +33,10 @@ class FairShareHandler(BaseHTTPRequestHandler):
             self._send_json(200, {"ok": True, "runtime": "python-sqlite"})
             return
         if self.path == "/api/summary":
+            client_ip = self.client_address[0]
+            if client_ip not in LOCAL_ADDRS:
+                self._send_json(403, {"error": "Localhost access only."})
+                return
             members = [dict(r) for r in conn.execute("SELECT id FROM group_members").fetchall()]
             expenses = [dict(r) for r in conn.execute("SELECT * FROM expenses").fetchall()]
             splits = [dict(r) for r in conn.execute("SELECT * FROM expense_splits").fetchall()]

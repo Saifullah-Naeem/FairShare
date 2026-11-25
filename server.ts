@@ -482,8 +482,46 @@ function buildGroupState(groupId: number, currentUserId: number, currentMemberId
   };
 }
 
+const AUTH_RATE_WINDOW_MS = 10 * 60 * 1000;
+const AUTH_RATE_MAX_ATTEMPTS = 25;
+const authAttempts = new Map<string, number[]>();
+
+function checkAuthRateLimit(req: Request, res: Response, scope: string): boolean {
+  const now = Date.now();
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
+  const key = `${scope}:${ip}`;
+  const recent = (authAttempts.get(key) ?? []).filter(
+    (ts) => now - ts < AUTH_RATE_WINDOW_MS,
+  );
+  if (recent.length >= AUTH_RATE_MAX_ATTEMPTS) {
+    authAttempts.set(key, recent);
+    res
+      .status(429)
+      .json({ error: 'Too many attempts. Please wait a few minutes and try again.' });
+    return false;
+  }
+  recent.push(now);
+  authAttempts.set(key, recent);
+  if (authAttempts.size > 1000) {
+    for (const [k, list] of authAttempts.entries()) {
+      const valid = list.filter((ts) => now - ts < AUTH_RATE_WINDOW_MS);
+      if (valid.length === 0) authAttempts.delete(k);
+      else authAttempts.set(k, valid);
+    }
+  }
+  return true;
+}
+
 async function startServer() {
   const app = express();
+  app.disable('x-powered-by');
+  app.use((_req, res, next) => {
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'no-referrer');
+    res.setHeader('X-Permitted-Cross-Domain-Policies', 'none');
+    res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
+    next();
+  });
   app.use(express.json({ limit: '2mb' }));
 
   app.get('/api/health', (_req, res) => {
@@ -491,6 +529,7 @@ async function startServer() {
   });
 
   app.post('/api/auth/register', (req, res) => {
+    if (!checkAuthRateLimit(req, res, 'register')) return;
     const { name, handle, password, initialGroupName, iconKey, accentTheme } =
       req.body as {
         name?: string;
@@ -521,8 +560,10 @@ async function startServer() {
       });
       return;
     }
-    if (rawPassword.length < 6) {
-      res.status(400).json({ error: 'Password must be at least 6 characters.' });
+    if (rawPassword.length < 6 || rawPassword.length > 128) {
+      res
+        .status(400)
+        .json({ error: 'Password must be between 6 and 128 characters.' });
       return;
     }
 
@@ -588,6 +629,7 @@ async function startServer() {
   });
 
   app.post('/api/auth/login', (req, res) => {
+    if (!checkAuthRateLimit(req, res, 'login')) return;
     const { handle, password } = req.body as {
       handle?: string;
       password?: string;
@@ -670,11 +712,26 @@ async function startServer() {
 
     const cleanIcon = normalizeGroupIcon(iconKey);
     const cleanTheme = normalizeAccentTheme(accentTheme);
-    const qStart = Number.isInteger(quietHoursStart) ? Number(quietHoursStart) : 22;
-    const qEnd = Number.isInteger(quietHoursEnd) ? Number(quietHoursEnd) : 8;
-    const cooldown = Number.isInteger(reminderCooldownHours)
-      ? Number(reminderCooldownHours)
-      : 12;
+    const qStart =
+      quietHoursStart === undefined ? 22 : Number(quietHoursStart);
+    const qEnd = quietHoursEnd === undefined ? 8 : Number(quietHoursEnd);
+    const cooldown =
+      reminderCooldownHours === undefined ? 12 : Number(reminderCooldownHours);
+
+    if (
+      !Number.isInteger(qStart) ||
+      qStart < 0 ||
+      qStart > 23 ||
+      !Number.isInteger(qEnd) ||
+      qEnd < 0 ||
+      qEnd > 23 ||
+      !Number.isInteger(cooldown) ||
+      cooldown < 1 ||
+      cooldown > 168
+    ) {
+      res.status(400).json({ error: 'Invalid reminder quiet hours or cooldown.' });
+      return;
+    }
 
     const now = new Date().toISOString();
     const created = db.transaction(() => {
@@ -787,8 +844,8 @@ async function startServer() {
         .trim()
         .replace(/^@/, '')
         .toLowerCase();
-      if (!rawHandle) {
-        res.status(400).json({ error: 'Enter a valid @username to add.' });
+      if (!/^[a-z0-9_]{3,24}$/.test(rawHandle)) {
+        res.status(400).json({ error: 'Enter a valid @username (3–24 characters) to add.' });
         return;
       }
 
@@ -844,8 +901,37 @@ async function startServer() {
     },
   );
 
-  app.get('/api/receipts/:filename', (req, res) => {
+  app.get('/api/receipts/:filename', requireAuth, (req: AuthenticatedRequest, res) => {
+    const user = req.authUser!;
     const rawName = path.basename(req.params.filename || '');
+    if (!/^receipt-[0-9a-f-]{36}\.(jpg|jpeg|png|webp|pdf)$/i.test(rawName)) {
+      res.status(400).json({ error: 'Invalid receipt identifier.' });
+      return;
+    }
+
+    const receiptRoutePath = `/api/receipts/${rawName}`;
+    const ownsExpenseReceipt = db
+      .prepare(
+        `SELECT 1 FROM expenses e
+         JOIN group_members gm ON gm.group_id = e.group_id
+         WHERE e.receipt_path = ? AND gm.user_id = ?
+         LIMIT 1`,
+      )
+      .get(receiptRoutePath, user.userId);
+    const ownsSettlementReceipt = db
+      .prepare(
+        `SELECT 1 FROM settlements s
+         JOIN group_members gm ON gm.group_id = s.group_id
+         WHERE s.receipt_path = ? AND gm.user_id = ?
+         LIMIT 1`,
+      )
+      .get(receiptRoutePath, user.userId);
+
+    if (!ownsExpenseReceipt && !ownsSettlementReceipt) {
+      res.status(403).json({ error: 'You do not have permission to view this receipt.' });
+      return;
+    }
+
     const resolved = path.resolve(UPLOADS_DIR, rawName);
     if (!resolved.startsWith(UPLOADS_DIR + path.sep)) {
       res.status(400).json({ error: 'Invalid receipt path.' });
@@ -855,6 +941,7 @@ async function startServer() {
       res.status(404).json({ error: 'Receipt not found.' });
       return;
     }
+    res.setHeader('Content-Disposition', `inline; filename="${rawName}"`);
     res.sendFile(resolved);
   });
 
@@ -875,6 +962,14 @@ async function startServer() {
 
         if (!title || title.length > 120) {
           res.status(400).json({ error: 'Title is required (max 120 characters).' });
+          return;
+        }
+        if (category.length > 40) {
+          res.status(400).json({ error: 'Category must be 40 characters or less.' });
+          return;
+        }
+        if (!Number.isInteger(paidByMemberId) || paidByMemberId <= 0) {
+          res.status(400).json({ error: 'Invalid payer selected.' });
           return;
         }
         if (splitMode !== 'EQUAL' && splitMode !== 'CUSTOM') {
@@ -900,14 +995,20 @@ async function startServer() {
 
         let resolvedSplits: Array<{ memberId: number; amountMinor: number }>;
         if (splitMode === 'EQUAL') {
-          const rawIds =
-            typeof body.participantMemberIds === 'string'
-              ? (JSON.parse(body.participantMemberIds) as number[])
-              : (body.participantMemberIds as number[]);
-          if (!Array.isArray(rawIds) || rawIds.length === 0) {
+          let rawIds: unknown;
+          try {
+            rawIds =
+              typeof body.participantMemberIds === 'string'
+                ? JSON.parse(body.participantMemberIds)
+                : body.participantMemberIds;
+          } catch {
+            res.status(400).json({ error: 'Invalid participant list.' });
+            return;
+          }
+          if (!Array.isArray(rawIds) || rawIds.length === 0 || rawIds.length > 100) {
             res
               .status(400)
-              .json({ error: 'Select at least one person to split this bill.' });
+              .json({ error: 'Select between 1 and 100 people to split this bill.' });
             return;
           }
           for (const id of rawIds) {
@@ -921,29 +1022,29 @@ async function startServer() {
             rawIds.map((id) => Number(id)),
           );
         } else {
-          const rawCustom =
-            typeof body.customSplits === 'string'
-              ? (JSON.parse(body.customSplits) as Array<{
-                  memberId: number;
-                  amountMinor: number;
-                }>)
-              : (body.customSplits as Array<{
-                  memberId: number;
-                  amountMinor: number;
-                }>);
-          if (!Array.isArray(rawCustom)) {
+          let rawCustom: unknown;
+          try {
+            rawCustom =
+              typeof body.customSplits === 'string'
+                ? JSON.parse(body.customSplits)
+                : body.customSplits;
+          } catch {
+            res.status(400).json({ error: 'Invalid custom split data.' });
+            return;
+          }
+          if (!Array.isArray(rawCustom) || rawCustom.length === 0 || rawCustom.length > 100) {
             res.status(400).json({ error: 'Custom split amounts are required.' });
             return;
           }
-          for (const item of rawCustom) {
-            if (!validMemberSet.has(Number(item.memberId))) {
+          for (const item of rawCustom as Array<{ memberId?: unknown }>) {
+            if (!validMemberSet.has(Number(item?.memberId))) {
               res.status(400).json({ error: 'Invalid person in custom split.' });
               return;
             }
           }
           resolvedSplits = validateCustomSplits(
             totalMinor,
-            rawCustom.map((item) => ({
+            (rawCustom as Array<{ memberId: unknown; amountMinor: unknown }>).map((item) => ({
               memberId: Number(item.memberId),
               amountMinor: Number(item.amountMinor),
             })),
@@ -1028,10 +1129,10 @@ async function startServer() {
         res.status(400).json({ error: 'Invalid bill selected.' });
         return;
       }
-      if (!reason || reason.length < 3) {
+      if (!reason || reason.length < 3 || reason.length > 240) {
         res
           .status(400)
-          .json({ error: 'Please enter a short reason (at least 3 characters).' });
+          .json({ error: 'Reason must be between 3 and 240 characters.' });
         return;
       }
 
@@ -1112,7 +1213,12 @@ async function startServer() {
         const body = req.body as Record<string, unknown>;
         const fromMemberId = Number(body.fromMemberId ?? actor.memberId);
         const toMemberId = Number(body.toMemberId);
-        const note = String(body.note ?? '').trim() || null;
+        const rawNote = String(body.note ?? '').trim();
+        if (rawNote.length > 200) {
+          res.status(400).json({ error: 'Payment note must be 200 characters or less.' });
+          return;
+        }
+        const note = rawNote || null;
 
         if (!Number.isInteger(fromMemberId) || !Number.isInteger(toMemberId)) {
           res.status(400).json({ error: 'Choose who paid and who received.' });
@@ -1213,6 +1319,10 @@ async function startServer() {
       const actor = req.authMember!;
       const user = req.authUser!;
       const settlementId = Number(req.params.settlementId);
+      if (!Number.isInteger(settlementId) || settlementId <= 0) {
+        res.status(400).json({ error: 'Invalid payment selected.' });
+        return;
+      }
       const st = db
         .prepare(
           `SELECT id, group_id AS groupId, from_member_id AS fromMemberId,
@@ -1292,10 +1402,14 @@ async function startServer() {
       const settlementId = Number(req.params.settlementId);
       const reason = String((req.body as { reason?: string }).reason ?? '').trim();
 
-      if (!reason || reason.length < 3) {
+      if (!Number.isInteger(settlementId) || settlementId <= 0) {
+        res.status(400).json({ error: 'Invalid payment selected.' });
+        return;
+      }
+      if (!reason || reason.length < 3 || reason.length > 240) {
         res
           .status(400)
-          .json({ error: 'Please include a short reason for declining.' });
+          .json({ error: 'Decline reason must be between 3 and 240 characters.' });
         return;
       }
 
@@ -1372,6 +1486,10 @@ async function startServer() {
       const actor = req.authMember!;
       const user = req.authUser!;
       const settlementId = Number(req.params.settlementId);
+      if (!Number.isInteger(settlementId) || settlementId <= 0) {
+        res.status(400).json({ error: 'Invalid payment selected.' });
+        return;
+      }
       const st = db
         .prepare(
           `SELECT id, group_id AS groupId, from_member_id AS fromMemberId,
@@ -1535,6 +1653,10 @@ async function startServer() {
       }
 
       const targetMemberId = Number(req.params.memberId);
+      if (!Number.isInteger(targetMemberId) || targetMemberId <= 0) {
+        res.status(400).json({ error: 'Invalid roommate selected.' });
+        return;
+      }
       const target = loadGroupMemberById(targetMemberId);
       if (!target || target.groupId !== actor.groupId || !target.isShadow) {
         res.status(404).json({ error: 'Unclaimed roommate profile not found.' });
@@ -1575,6 +1697,7 @@ async function startServer() {
   );
 
   app.post('/api/shadow/claim', (req, res) => {
+    if (!checkAuthRateLimit(req, res, 'claim')) return;
     const { inviteCode, claimToken, handle, password, displayName } = req.body as {
       inviteCode?: string;
       claimToken?: string;
@@ -1589,9 +1712,18 @@ async function startServer() {
       .replace(/^@/, '')
       .toLowerCase();
     const rawPassword = String(password ?? '');
+    const cleanDisplayName =
+      typeof displayName === 'string' ? displayName.trim() : '';
 
-    if (!rawToken) {
-      res.status(400).json({ error: 'Invite code is required.' });
+    if (!rawToken || rawToken.length > 64) {
+      res.status(400).json({ error: 'Valid invite code is required.' });
+      return;
+    }
+    if (
+      cleanDisplayName &&
+      (cleanDisplayName.length < 2 || cleanDisplayName.length > 60)
+    ) {
+      res.status(400).json({ error: 'Display name must be 2–60 characters.' });
       return;
     }
     if (!/^[a-z0-9_]{3,24}$/.test(cleanHandle)) {
@@ -1600,8 +1732,10 @@ async function startServer() {
       });
       return;
     }
-    if (rawPassword.length < 6) {
-      res.status(400).json({ error: 'Password must be at least 6 characters.' });
+    if (rawPassword.length < 6 || rawPassword.length > 128) {
+      res
+        .status(400)
+        .json({ error: 'Password must be between 6 and 128 characters.' });
       return;
     }
 
@@ -1653,10 +1787,7 @@ async function startServer() {
           throw new Error(`Username @${cleanHandle} is already taken.`);
         }
 
-        const updatedName =
-          displayName && displayName.trim().length >= 2
-            ? displayName.trim()
-            : userRow.name;
+        const updatedName = cleanDisplayName || userRow.name;
 
         const updateResult = db
           .prepare(
@@ -1927,9 +2058,22 @@ async function startServer() {
       res: Response,
       _next: NextFunction,
     ): void => {
-      const message =
-        err instanceof Error ? err.message : 'Unexpected server error.';
-      res.status(400).json({ error: message });
+      if (err instanceof multer.MulterError) {
+        const msg =
+          err.code === 'LIMIT_FILE_SIZE'
+            ? 'Receipt file exceeds the 3 MB size limit.'
+            : 'Invalid receipt upload.';
+        res.status(400).json({ error: msg });
+        return;
+      }
+      if (
+        err instanceof Error &&
+        err.message.includes('Only JPG, PNG, WEBP, or PDF receipts')
+      ) {
+        res.status(400).json({ error: err.message });
+        return;
+      }
+      res.status(500).json({ error: 'Unexpected server error.' });
     },
   );
 

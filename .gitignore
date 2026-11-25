@@ -3,6 +3,7 @@ build/
 dist/
 coverage/
 .DS_Store
+Thumbs.db
 *.log
 .env*
 !.env.example
@@ -10,6 +11,14 @@ data/
 uploads/
 __pycache__/
 *.pyc
+*.pyo
+.pytest_cache/
+.venv/
+venv/
+env/
+*.egg-info/
 *.db
 *.db-wal
 *.db-shm
+.vscode/
+.idea/

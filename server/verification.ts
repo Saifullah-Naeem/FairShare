@@ -25,7 +25,6 @@ export interface VerificationProvider {
     recipientLabel: string;
     summaryText: string;
   }): { delivered: boolean; channel: string; note: string };
-  getActiveDevTokens(): VerificationTokenRecord[];
   consumeToken(token: string): void;
   clear(): void;
 }
@@ -60,9 +59,6 @@ export class DevMockVerificationProvider implements VerificationProvider {
     };
 
     this.activeTokens.set(token, record);
-    console.log(
-      `[DEV MOCK VERIFICATION] ${record.purpose} -> ${record.recipientLabel} | Code/Token: ${record.token} | Expires: ${record.expiresAt} | ${record.detail}`,
-    );
     return record;
   }
 
@@ -70,21 +66,11 @@ export class DevMockVerificationProvider implements VerificationProvider {
     recipientLabel: string;
     summaryText: string;
   }): { delivered: boolean; channel: string; note: string } {
-    console.log(
-      `[DEV MOCK REMINDER] To: ${params.recipientLabel} | Summary: ${params.summaryText}`,
-    );
     return {
       delivered: true,
-      channel: 'dev_mock_console',
-      note: 'Logged batched summary reminder to server console (no paid SMS/email sent).',
+      channel: 'in_app_summary',
+      note: `Prepared summary reminder for ${params.recipientLabel} (${params.summaryText.length} chars).`,
     };
-  }
-
-  public getActiveDevTokens(): VerificationTokenRecord[] {
-    this.pruneExpired();
-    return Array.from(this.activeTokens.values()).sort(
-      (a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime(),
-    );
   }
 
   public consumeToken(token: string): void {
@@ -110,18 +96,14 @@ export class ProductionStubVerificationProvider implements VerificationProvider 
 
   public issueToken(): VerificationTokenRecord {
     throw new Error(
-      'Production SMS/Email verification gateway is intentionally stubbed in this portfolio demo. Set FAIRSHARE_VERIFICATION_MODE=dev_mock.',
+      'External SMS/Email delivery is not configured. Use FAIRSHARE_VERIFICATION_MODE=dev_mock for local invite codes.',
     );
   }
 
   public sendBatchSummary(): { delivered: boolean; channel: string; note: string } {
     throw new Error(
-      'Production SMS/Email gateway is not configured in this concept demo.',
+      'External SMS/Email reminder delivery is not configured.',
     );
-  }
-
-  public getActiveDevTokens(): VerificationTokenRecord[] {
-    return [];
   }
 
   public consumeToken(): void {

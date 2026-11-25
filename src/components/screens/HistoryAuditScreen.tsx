@@ -7,6 +7,7 @@ import {
   formatSettlementStatus,
   formatTimestamp,
 } from '../../utils/currency';
+import { ReceiptPreviewModal } from '../ReceiptPreviewModal';
 
 interface HistoryAuditScreenProps {
   state: LedgerState;
@@ -30,6 +31,7 @@ export const HistoryAuditScreen: React.FC<HistoryAuditScreenProps> = ({
   const [voidingExpenseId, setVoidingExpenseId] = useState<number | null>(null);
   const [voidReason, setVoidReason] = useState('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [previewReceiptPath, setPreviewReceiptPath] = useState<string | null>(null);
 
   const currentMember = state.members.find(
     (m) => m.memberId === state.currentMemberId,
@@ -231,15 +233,14 @@ export const HistoryAuditScreen: React.FC<HistoryAuditScreenProps> = ({
 
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   {exp.receiptPath ? (
-                    <a
-                      href={exp.receiptPath}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1.5 text-xs font-semibold text-emerald-700 hover:text-emerald-600"
+                    <button
+                      type="button"
+                      onClick={() => setPreviewReceiptPath(exp.receiptPath)}
+                      className="inline-flex items-center gap-1.5 min-h-[36px] text-xs font-semibold text-emerald-700 hover:text-emerald-600"
                     >
                       <Paperclip className="w-3.5 h-3.5" />
                       <span>View Receipt</span>
-                    </a>
+                    </button>
                   ) : (
                     <span />
                   )}
@@ -374,6 +375,11 @@ export const HistoryAuditScreen: React.FC<HistoryAuditScreenProps> = ({
             No activity matches your filter yet.
           </div>
         )}
+
+      <ReceiptPreviewModal
+        receiptPath={previewReceiptPath}
+        onClose={() => setPreviewReceiptPath(null)}
+      />
     </div>
   );
 };

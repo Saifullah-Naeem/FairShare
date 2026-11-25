@@ -10,6 +10,33 @@ export function getMemoryAuthToken(): string | null {
   return memoryToken;
 }
 
+export async function fetchReceiptBlobUrl(receiptPath: string): Promise<{
+  url: string;
+  contentType: string;
+  fileName: string;
+}> {
+  if (!/^\/api\/receipts\/receipt-[0-9a-f-]{36}\.(jpg|jpeg|png|webp|pdf)$/i.test(receiptPath)) {
+    throw new Error('Invalid receipt path.');
+  }
+  const headers = new Headers();
+  if (memoryToken) {
+    headers.set('Authorization', `Bearer ${memoryToken}`);
+  }
+  const res = await fetch(receiptPath, { headers });
+  if (!res.ok) {
+    const errData = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(errData.error || 'Unable to load receipt.');
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const fileName = receiptPath.split('/').pop() || 'receipt';
+  return {
+    url,
+    contentType: blob.type || 'application/octet-stream',
+    fileName,
+  };
+}
+
 async function apiRequest<T>(
   path: string,
   options: RequestInit = {},
