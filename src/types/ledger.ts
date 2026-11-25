@@ -15,10 +15,45 @@ export type ScreenId =
   | 'shadow'
   | 'history';
 
+export type GroupIconKey =
+  | 'home'
+  | 'compass'
+  | 'utensils'
+  | 'users'
+  | 'bolt'
+  | 'wallet';
+
+export type GroupAccentTheme =
+  | 'emerald'
+  | 'violet'
+  | 'teal'
+  | 'indigo'
+  | 'rose';
+
+export interface UserProfile {
+  userId: number;
+  name: string;
+  handle: string;
+}
+
+export interface GroupSummary {
+  id: number;
+  name: string;
+  currencyCode: string;
+  iconKey: GroupIconKey;
+  accentTheme: GroupAccentTheme;
+  role: Role;
+  memberId: number;
+  memberCount: number;
+  pendingCount: number;
+}
+
 export interface GroupInfo {
   id: number;
   name: string;
   currencyCode: string;
+  iconKey: GroupIconKey;
+  accentTheme: GroupAccentTheme;
   quietHoursStart: number;
   quietHoursEnd: number;
   reminderCooldownHours: number;
@@ -137,21 +172,9 @@ export interface AuditLogItem {
   createdAt: string;
 }
 
-export interface VerificationTokenItem {
-  id: string;
-  purpose: 'SHADOW_CLAIM' | 'REMINDER_BATCH' | 'ACCOUNT_LOGIN_OTP';
-  recipientLabel: string;
-  token: string;
-  expiresAt: string;
-  createdAt: string;
-  detail: string;
-}
-
 export interface LedgerState {
-  demoEnvironment: boolean;
-  verificationMode: 'dev_mock' | 'production_stub';
-  devTokens: VerificationTokenItem[];
-  currentMemberId: number | null;
+  currentMemberId: number;
+  groups: GroupSummary[];
   group: GroupInfo;
   members: GroupMember[];
   expenses: ExpenseItem[];

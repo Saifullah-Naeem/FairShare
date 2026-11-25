@@ -11,15 +11,14 @@ import {
   hashClaimToken,
   hashPassword,
   initDatabase,
-  seedDemoData,
   verifyPassword,
 } from './server/db.ts';
 import {
   computeEqualSplits,
   computeGroupBalances,
   evaluateReminderEligibility,
-  formatPaisaToPkr,
-  parsePkrToPaisa,
+  formatMinorToPkr,
+  parsePkrToMinor,
   validateCustomSplits,
 } from './server/ledger.ts';
 import type {
@@ -48,25 +47,26 @@ fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 const verificationProvider = createVerificationProvider(VERIFICATION_MODE);
 const db = initDatabase(DB_PATH);
 
-// Seed realistic PKR demo data on initial boot if empty
-const existingGroupCount = db
-  .prepare('SELECT COUNT(*) AS cnt FROM groups')
-  .get() as { cnt: number };
-if (existingGroupCount.cnt === 0) {
-  seedDemoData(db, verificationProvider);
-}
-
 interface SessionPayload {
   userId: number;
-  memberId: number;
-  groupId: number;
   exp: number;
 }
 
-function signSessionToken(payload: Omit<SessionPayload, 'exp'>): string {
+interface AuthenticatedUser {
+  userId: number;
+  name: string;
+  handle: string;
+}
+
+interface AuthenticatedRequest extends Request {
+  authUser?: AuthenticatedUser;
+  authMember?: MemberRecord & { groupId: number };
+}
+
+function signSessionToken(userId: number): string {
   const fullPayload: SessionPayload = {
-    ...payload,
-    exp: Date.now() + 7 * 24 * 3600 * 1000,
+    userId,
+    exp: Date.now() + 14 * 24 * 3600 * 1000,
   };
   const body = Buffer.from(JSON.stringify(fullPayload)).toString('base64url');
   const sig = crypto
@@ -93,7 +93,7 @@ function verifySessionToken(token: string): SessionPayload | null {
     const parsed = JSON.parse(
       Buffer.from(body, 'base64url').toString('utf8'),
     ) as SessionPayload;
-    if (!parsed || typeof parsed.memberId !== 'number' || parsed.exp < Date.now()) {
+    if (!parsed || typeof parsed.userId !== 'number' || parsed.exp < Date.now()) {
       return null;
     }
     return parsed;
@@ -102,21 +102,43 @@ function verifySessionToken(token: string): SessionPayload | null {
   }
 }
 
-interface AuthenticatedRequest extends Request {
-  authMember?: MemberRecord & { groupId: number };
-}
-
-function loadActiveGroupId(): number {
+function loadUserById(userId: number): AuthenticatedUser | null {
   const row = db
-    .prepare('SELECT id FROM groups ORDER BY id ASC LIMIT 1')
-    .get() as { id: number } | undefined;
-  if (!row) {
-    return seedDemoData(db, verificationProvider).groupId;
-  }
-  return row.id;
+    .prepare(
+      `SELECT id AS userId, name, handle, is_shadow AS isShadow
+       FROM users WHERE id = ?`,
+    )
+    .get(userId) as
+    | { userId: number; name: string; handle: string | null; isShadow: number }
+    | undefined;
+  if (!row || row.isShadow === 1 || !row.handle) return null;
+  return { userId: row.userId, name: row.name, handle: row.handle };
 }
 
-function loadGroupMemberById(memberId: number): (MemberRecord & { groupId: number }) | null {
+function loadGroupMemberByUser(
+  groupId: number,
+  userId: number,
+): (MemberRecord & { groupId: number }) | null {
+  const row = db
+    .prepare(
+      `SELECT gm.id AS memberId, gm.group_id AS groupId, gm.user_id AS userId,
+              u.name, u.handle, gm.role, u.is_shadow AS isShadow,
+              u.claimed_at AS claimedAt, gm.snoozed_until AS snoozedUntil,
+              gm.last_reminded_at AS lastRemindedAt
+       FROM group_members gm
+       JOIN users u ON u.id = gm.user_id
+       WHERE gm.group_id = ? AND gm.user_id = ?`,
+    )
+    .get(groupId, userId) as
+    | (Omit<MemberRecord, 'isShadow'> & { isShadow: number; groupId: number })
+    | undefined;
+  if (!row) return null;
+  return { ...row, isShadow: row.isShadow === 1 };
+}
+
+function loadGroupMemberById(
+  memberId: number,
+): (MemberRecord & { groupId: number }) | null {
   const row = db
     .prepare(
       `SELECT gm.id AS memberId, gm.group_id AS groupId, gm.user_id AS userId,
@@ -131,10 +153,60 @@ function loadGroupMemberById(memberId: number): (MemberRecord & { groupId: numbe
     | (Omit<MemberRecord, 'isShadow'> & { isShadow: number; groupId: number })
     | undefined;
   if (!row) return null;
-  return {
-    ...row,
-    isShadow: row.isShadow === 1,
-  };
+  return { ...row, isShadow: row.isShadow === 1 };
+}
+
+const VALID_GROUP_ICONS = new Set([
+  'home',
+  'compass',
+  'utensils',
+  'users',
+  'bolt',
+  'wallet',
+]);
+const VALID_ACCENT_THEMES = new Set([
+  'emerald',
+  'violet',
+  'teal',
+  'indigo',
+  'rose',
+]);
+
+function normalizeGroupIcon(raw?: unknown): string {
+  const val = String(raw ?? 'home').trim().toLowerCase();
+  return VALID_GROUP_ICONS.has(val) ? val : 'home';
+}
+
+function normalizeAccentTheme(raw?: unknown): string {
+  const val = String(raw ?? 'emerald').trim().toLowerCase();
+  return VALID_ACCENT_THEMES.has(val) ? val : 'emerald';
+}
+
+function loadUserGroups(userId: number) {
+  const rows = db
+    .prepare(
+      `SELECT g.id, g.name, g.currency_code AS currencyCode,
+              g.icon_key AS iconKey, g.accent_theme AS accentTheme,
+              gm.role, gm.id AS memberId,
+              (SELECT COUNT(*) FROM group_members gm2 WHERE gm2.group_id = g.id) AS memberCount,
+              (SELECT COUNT(*) FROM settlements s WHERE s.group_id = g.id AND s.status = 'PENDING_CONFIRMATION') AS pendingCount
+       FROM group_members gm
+       JOIN groups g ON g.id = gm.group_id
+       WHERE gm.user_id = ?
+       ORDER BY datetime(g.created_at) DESC, g.id DESC`,
+    )
+    .all(userId) as Array<{
+    id: number;
+    name: string;
+    currencyCode: string;
+    iconKey: string;
+    accentTheme: string;
+    role: Role;
+    memberId: number;
+    memberCount: number;
+    pendingCount: number;
+  }>;
+  return rows;
 }
 
 function requireAuth(
@@ -144,18 +216,42 @@ function requireAuth(
 ): void {
   const header = req.headers.authorization;
   if (!header || !header.startsWith('Bearer ')) {
-    res.status(401).json({ error: 'Authentication required.' });
+    res.status(401).json({ error: 'Please sign in to continue.' });
     return;
   }
   const token = header.slice(7).trim();
   const payload = verifySessionToken(token);
   if (!payload) {
-    res.status(401).json({ error: 'Session expired or invalid.' });
+    res.status(401).json({ error: 'Your session expired. Please sign in again.' });
     return;
   }
-  const member = loadGroupMemberById(payload.memberId);
-  if (!member || member.userId !== payload.userId || member.isShadow) {
-    res.status(401).json({ error: 'Active claimed account required.' });
+  const user = loadUserById(payload.userId);
+  if (!user) {
+    res.status(401).json({ error: 'Account not found or inactive.' });
+    return;
+  }
+  req.authUser = user;
+  next();
+}
+
+function requireGroupMember(
+  req: AuthenticatedRequest,
+  res: Response,
+  next: NextFunction,
+): void {
+  const user = req.authUser;
+  if (!user) {
+    res.status(401).json({ error: 'Please sign in to continue.' });
+    return;
+  }
+  const groupId = Number(req.params.groupId);
+  if (!Number.isInteger(groupId) || groupId <= 0) {
+    res.status(400).json({ error: 'Invalid group selected.' });
+    return;
+  }
+  const member = loadGroupMemberByUser(groupId, user.userId);
+  if (!member || member.isShadow) {
+    res.status(403).json({ error: 'You are not a member of this group.' });
     return;
   }
   req.authMember = member;
@@ -193,11 +289,11 @@ const upload = multer({
   },
 });
 
-function buildFullState(actorMemberId?: number | null) {
-  const groupId = loadActiveGroupId();
+function buildGroupState(groupId: number, currentUserId: number, currentMemberId: number) {
   const group = db
     .prepare(
-      `SELECT id, name, currency_code AS currencyCode, quiet_hours_start AS quietHoursStart,
+      `SELECT id, name, currency_code AS currencyCode, icon_key AS iconKey,
+              accent_theme AS accentTheme, quiet_hours_start AS quietHoursStart,
               quiet_hours_end AS quietHoursEnd, reminder_cooldown_hours AS reminderCooldownHours,
               created_at AS createdAt
        FROM groups WHERE id = ?`,
@@ -206,6 +302,8 @@ function buildFullState(actorMemberId?: number | null) {
     id: number;
     name: string;
     currencyCode: string;
+    iconKey: string;
+    accentTheme: string;
     quietHoursStart: number;
     quietHoursEnd: number;
     reminderCooldownHours: number;
@@ -372,13 +470,8 @@ function buildFullState(actorMemberId?: number | null) {
   });
 
   return {
-    demoEnvironment: true,
-    verificationMode: verificationProvider.mode,
-    devTokens:
-      verificationProvider.mode === 'dev_mock'
-        ? verificationProvider.getActiveDevTokens()
-        : [],
-    currentMemberId: actorMemberId ?? null,
+    currentMemberId,
+    groups: loadUserGroups(currentUserId),
     group,
     members,
     expenses: enrichedExpenses,
@@ -394,48 +487,104 @@ async function startServer() {
   app.use(express.json({ limit: '2mb' }));
 
   app.get('/api/health', (_req, res) => {
-    res.json({ ok: true, verificationMode: verificationProvider.mode });
+    res.json({ ok: true });
   });
 
-  app.get('/api/state', (req: AuthenticatedRequest, res) => {
-    let currentMemberId: number | null = null;
-    const header = req.headers.authorization;
-    if (header && header.startsWith('Bearer ')) {
-      const payload = verifySessionToken(header.slice(7).trim());
-      if (payload) {
-        const m = loadGroupMemberById(payload.memberId);
-        if (m && !m.isShadow) {
-          currentMemberId = m.memberId;
-        }
-      }
-    }
-    res.json(buildFullState(currentMemberId));
-  });
+  app.post('/api/auth/register', (req, res) => {
+    const { name, handle, password, initialGroupName, iconKey, accentTheme } =
+      req.body as {
+        name?: string;
+        handle?: string;
+        password?: string;
+        initialGroupName?: string;
+        iconKey?: string;
+        accentTheme?: string;
+      };
 
-  app.post('/api/auth/demo-switch', (req, res) => {
-    const { memberId } = req.body as { memberId?: number };
-    if (!Number.isInteger(memberId)) {
-      res.status(400).json({ error: 'Valid memberId is required.' });
+    const cleanName = String(name ?? '').trim();
+    const cleanHandle = String(handle ?? '')
+      .trim()
+      .replace(/^@/, '')
+      .toLowerCase();
+    const rawPassword = String(password ?? '');
+    const cleanGroupName = String(initialGroupName ?? '').trim();
+    const cleanIcon = normalizeGroupIcon(iconKey);
+    const cleanTheme = normalizeAccentTheme(accentTheme);
+
+    if (cleanName.length < 2 || cleanName.length > 60) {
+      res.status(400).json({ error: 'Name must be between 2 and 60 characters.' });
       return;
     }
-    const member = loadGroupMemberById(Number(memberId));
-    if (!member) {
-      res.status(404).json({ error: 'Member not found.' });
-      return;
-    }
-    if (member.isShadow) {
-      res.status(403).json({
-        error:
-          'Shadow members have not claimed an account yet. Use the Shadow Claim screen first.',
+    if (!/^[a-z0-9_]{3,24}$/.test(cleanHandle)) {
+      res.status(400).json({
+        error: 'Username must be 3–24 lowercase letters, numbers, or underscores.',
       });
       return;
     }
-    const token = signSessionToken({
-      userId: member.userId,
-      memberId: member.memberId,
-      groupId: member.groupId,
-    });
-    res.json({ token, member });
+    if (rawPassword.length < 6) {
+      res.status(400).json({ error: 'Password must be at least 6 characters.' });
+      return;
+    }
+
+    const existing = db
+      .prepare(`SELECT id FROM users WHERE LOWER(handle) = ?`)
+      .get(cleanHandle) as { id: number } | undefined;
+    if (existing) {
+      res.status(409).json({ error: `Username @${cleanHandle} is already taken.` });
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const created = db.transaction(() => {
+      const userId = Number(
+        db
+          .prepare(
+            `INSERT INTO users (name, handle, password_hash, is_shadow, claimed_at, created_at)
+             VALUES (?, ?, ?, 0, ?, ?)`,
+          )
+          .run(cleanName, cleanHandle, hashPassword(rawPassword), now, now)
+          .lastInsertRowid,
+      );
+
+      let initialGroupId: number | null = null;
+      if (cleanGroupName.length >= 2) {
+        initialGroupId = Number(
+          db
+            .prepare(
+              `INSERT INTO groups (name, currency_code, icon_key, accent_theme, quiet_hours_start, quiet_hours_end, reminder_cooldown_hours, created_by_user_id, created_at)
+               VALUES (?, 'PKR', ?, ?, 22, 8, 12, ?, ?)`,
+            )
+            .run(cleanGroupName.slice(0, 80), cleanIcon, cleanTheme, userId, now)
+            .lastInsertRowid,
+        );
+
+        const memberId = Number(
+          db
+            .prepare(
+              `INSERT INTO group_members (group_id, user_id, role, joined_at)
+               VALUES (?, ?, 'HOST', ?)`,
+            )
+            .run(initialGroupId, userId, now).lastInsertRowid,
+        );
+
+        appendAuditLog(db, {
+          groupId: initialGroupId,
+          actorMemberId: memberId,
+          actionType: 'GROUP_CREATED',
+          entityType: 'GROUP',
+          entityId: initialGroupId,
+          payload: { name: cleanGroupName.slice(0, 80), currency: 'PKR' },
+          createdAt: now,
+        });
+      }
+
+      return { userId, initialGroupId };
+    })();
+
+    const token = signSessionToken(created.userId);
+    const user = loadUserById(created.userId)!;
+    const groups = loadUserGroups(created.userId);
+    res.status(201).json({ token, user, groups, activeGroupId: created.initialGroupId });
   });
 
   app.post('/api/auth/login', (req, res) => {
@@ -444,46 +593,256 @@ async function startServer() {
       password?: string;
     };
     if (!handle || !password) {
-      res.status(400).json({ error: 'Handle and password are required.' });
+      res.status(400).json({ error: 'Username and password are required.' });
       return;
     }
     const cleanHandle = handle.trim().replace(/^@/, '').toLowerCase();
     const row = db
       .prepare(
-        `SELECT u.id AS userId, u.password_hash AS passwordHash, u.is_shadow AS isShadow,
-                gm.id AS memberId, gm.group_id AS groupId
-         FROM users u
-         JOIN group_members gm ON gm.user_id = u.id
-         WHERE LOWER(u.handle) = ?
-         LIMIT 1`,
+        `SELECT id AS userId, name, handle, password_hash AS passwordHash, is_shadow AS isShadow
+         FROM users WHERE LOWER(handle) = ? LIMIT 1`,
       )
       .get(cleanHandle) as
       | {
           userId: number;
+          name: string;
+          handle: string;
           passwordHash: string | null;
           isShadow: number;
-          memberId: number;
-          groupId: number;
         }
       | undefined;
 
     if (!row || row.isShadow === 1 || !row.passwordHash) {
-      res.status(401).json({ error: 'Invalid handle or password.' });
+      res.status(401).json({ error: 'Incorrect username or password.' });
       return;
     }
     if (!verifyPassword(password, row.passwordHash)) {
-      res.status(401).json({ error: 'Invalid handle or password.' });
+      res.status(401).json({ error: 'Incorrect username or password.' });
       return;
     }
 
-    const token = signSessionToken({
-      userId: row.userId,
-      memberId: row.memberId,
-      groupId: row.groupId,
+    const token = signSessionToken(row.userId);
+    const groups = loadUserGroups(row.userId);
+    res.json({
+      token,
+      user: { userId: row.userId, name: row.name, handle: row.handle },
+      groups,
+      activeGroupId: groups[0]?.id ?? null,
     });
-    const member = loadGroupMemberById(row.memberId);
-    res.json({ token, member });
   });
+
+  app.get('/api/me', requireAuth, (req: AuthenticatedRequest, res) => {
+    const user = req.authUser!;
+    res.json({
+      user,
+      groups: loadUserGroups(user.userId),
+    });
+  });
+
+  app.get('/api/groups', requireAuth, (req: AuthenticatedRequest, res) => {
+    const user = req.authUser!;
+    res.json({ groups: loadUserGroups(user.userId) });
+  });
+
+  app.post('/api/groups', requireAuth, (req: AuthenticatedRequest, res) => {
+    const user = req.authUser!;
+    const {
+      name,
+      iconKey,
+      accentTheme,
+      quietHoursStart,
+      quietHoursEnd,
+      reminderCooldownHours,
+    } = req.body as {
+      name?: string;
+      iconKey?: string;
+      accentTheme?: string;
+      quietHoursStart?: number;
+      quietHoursEnd?: number;
+      reminderCooldownHours?: number;
+    };
+
+    const cleanName = String(name ?? '').trim();
+    if (cleanName.length < 2 || cleanName.length > 80) {
+      res.status(400).json({ error: 'Group name must be 2–80 characters.' });
+      return;
+    }
+
+    const cleanIcon = normalizeGroupIcon(iconKey);
+    const cleanTheme = normalizeAccentTheme(accentTheme);
+    const qStart = Number.isInteger(quietHoursStart) ? Number(quietHoursStart) : 22;
+    const qEnd = Number.isInteger(quietHoursEnd) ? Number(quietHoursEnd) : 8;
+    const cooldown = Number.isInteger(reminderCooldownHours)
+      ? Number(reminderCooldownHours)
+      : 12;
+
+    const now = new Date().toISOString();
+    const created = db.transaction(() => {
+      const groupId = Number(
+        db
+          .prepare(
+            `INSERT INTO groups (name, currency_code, icon_key, accent_theme, quiet_hours_start, quiet_hours_end, reminder_cooldown_hours, created_by_user_id, created_at)
+             VALUES (?, 'PKR', ?, ?, ?, ?, ?, ?, ?)`,
+          )
+          .run(cleanName, cleanIcon, cleanTheme, qStart, qEnd, cooldown, user.userId, now)
+          .lastInsertRowid,
+      );
+
+      const memberId = Number(
+        db
+          .prepare(
+            `INSERT INTO group_members (group_id, user_id, role, joined_at)
+             VALUES (?, ?, 'HOST', ?)`,
+          )
+          .run(groupId, user.userId, now).lastInsertRowid,
+      );
+
+      appendAuditLog(db, {
+        groupId,
+        actorMemberId: memberId,
+        actionType: 'GROUP_CREATED',
+        entityType: 'GROUP',
+        entityId: groupId,
+        payload: { name: cleanName, iconKey: cleanIcon, accentTheme: cleanTheme },
+        createdAt: now,
+      });
+
+      return { groupId, memberId };
+    })();
+
+    res.status(201).json({
+      groupId: created.groupId,
+      state: buildGroupState(created.groupId, user.userId, created.memberId),
+    });
+  });
+
+  app.patch(
+    '/api/groups/:groupId/appearance',
+    requireAuth,
+    requireGroupMember,
+    (req: AuthenticatedRequest, res) => {
+      const actor = req.authMember!;
+      const user = req.authUser!;
+      if (actor.role !== 'HOST' && actor.role !== 'ADMIN') {
+        res
+          .status(403)
+          .json({ error: 'Only a group Host or Admin can customize the group badge.' });
+        return;
+      }
+
+      const { iconKey, accentTheme } = req.body as {
+        iconKey?: string;
+        accentTheme?: string;
+      };
+      const cleanIcon = normalizeGroupIcon(iconKey);
+      const cleanTheme = normalizeAccentTheme(accentTheme);
+      const now = new Date().toISOString();
+
+      db.transaction(() => {
+        db.prepare(
+          `UPDATE groups SET icon_key = ?, accent_theme = ? WHERE id = ?`,
+        ).run(cleanIcon, cleanTheme, actor.groupId);
+
+        appendAuditLog(db, {
+          groupId: actor.groupId,
+          actorMemberId: actor.memberId,
+          actionType: 'GROUP_STYLE_UPDATED',
+          entityType: 'GROUP',
+          entityId: actor.groupId,
+          payload: { iconKey: cleanIcon, accentTheme: cleanTheme },
+          createdAt: now,
+        });
+      })();
+
+      res.json({
+        state: buildGroupState(actor.groupId, user.userId, actor.memberId),
+      });
+    },
+  );
+
+  app.get(
+    '/api/groups/:groupId/state',
+    requireAuth,
+    requireGroupMember,
+    (req: AuthenticatedRequest, res) => {
+      const member = req.authMember!;
+      const user = req.authUser!;
+      res.json(buildGroupState(member.groupId, user.userId, member.memberId));
+    },
+  );
+
+  app.post(
+    '/api/groups/:groupId/members',
+    requireAuth,
+    requireGroupMember,
+    (req: AuthenticatedRequest, res) => {
+      const actor = req.authMember!;
+      const user = req.authUser!;
+      if (actor.role !== 'HOST' && actor.role !== 'ADMIN') {
+        res.status(403).json({ error: 'Only a group Host or Admin can add members.' });
+        return;
+      }
+
+      const rawHandle = String((req.body as { handle?: string }).handle ?? '')
+        .trim()
+        .replace(/^@/, '')
+        .toLowerCase();
+      if (!rawHandle) {
+        res.status(400).json({ error: 'Enter a valid @username to add.' });
+        return;
+      }
+
+      const targetUser = db
+        .prepare(
+          `SELECT id, name, handle, is_shadow AS isShadow FROM users WHERE LOWER(handle) = ?`,
+        )
+        .get(rawHandle) as
+        | { id: number; name: string; handle: string; isShadow: number }
+        | undefined;
+
+      if (!targetUser || targetUser.isShadow === 1) {
+        res.status(404).json({
+          error: `No registered account found for @${rawHandle}. Use "Add Unregistered Friend" if they haven't signed up yet.`,
+        });
+        return;
+      }
+
+      const existing = db
+        .prepare(
+          `SELECT id FROM group_members WHERE group_id = ? AND user_id = ?`,
+        )
+        .get(actor.groupId, targetUser.id) as { id: number } | undefined;
+      if (existing) {
+        res.status(409).json({ error: `${targetUser.name} is already in this group.` });
+        return;
+      }
+
+      const now = new Date().toISOString();
+      db.transaction(() => {
+        const newMemberId = Number(
+          db
+            .prepare(
+              `INSERT INTO group_members (group_id, user_id, role, joined_at) VALUES (?, ?, 'MEMBER', ?)`,
+            )
+            .run(actor.groupId, targetUser.id, now).lastInsertRowid,
+        );
+
+        appendAuditLog(db, {
+          groupId: actor.groupId,
+          actorMemberId: actor.memberId,
+          actionType: 'MEMBER_ADDED',
+          entityType: 'MEMBER',
+          entityId: newMemberId,
+          payload: { name: targetUser.name, handle: targetUser.handle },
+          createdAt: now,
+        });
+      })();
+
+      res.status(201).json({
+        state: buildGroupState(actor.groupId, user.userId, actor.memberId),
+      });
+    },
+  );
 
   app.get('/api/receipts/:filename', (req, res) => {
     const rawName = path.basename(req.params.filename || '');
@@ -500,12 +859,14 @@ async function startServer() {
   });
 
   app.post(
-    '/api/expenses',
+    '/api/groups/:groupId/expenses',
     requireAuth,
+    requireGroupMember,
     upload.single('receipt'),
     (req: AuthenticatedRequest, res) => {
       try {
         const actor = req.authMember!;
+        const user = req.authUser!;
         const body = req.body as Record<string, unknown>;
         const title = String(body.title ?? '').trim();
         const category = String(body.category ?? 'General').trim() || 'General';
@@ -513,24 +874,22 @@ async function startServer() {
         const paidByMemberId = Number(body.paidByMemberId ?? actor.memberId);
 
         if (!title || title.length > 120) {
-          res.status(400).json({ error: 'Title is required (max 120 chars).' });
+          res.status(400).json({ error: 'Title is required (max 120 characters).' });
           return;
         }
         if (splitMode !== 'EQUAL' && splitMode !== 'CUSTOM') {
-          res.status(400).json({ error: 'splitMode must be EQUAL or CUSTOM.' });
+          res.status(400).json({ error: 'Choose Equal or Custom split.' });
           return;
         }
 
-        const totalMinor = parsePkrToPaisa(
+        const totalMinor = parsePkrToMinor(
           typeof body.amountPkr === 'string' || typeof body.amountPkr === 'number'
             ? body.amountPkr
             : String(body.totalMinor ? Number(body.totalMinor) / 100 : ''),
         );
 
         const groupMembers = db
-          .prepare(
-            `SELECT id FROM group_members WHERE group_id = ?`,
-          )
+          .prepare(`SELECT id FROM group_members WHERE group_id = ?`)
           .all(actor.groupId) as Array<{ id: number }>;
         const validMemberSet = new Set(groupMembers.map((m) => m.id));
 
@@ -548,12 +907,12 @@ async function startServer() {
           if (!Array.isArray(rawIds) || rawIds.length === 0) {
             res
               .status(400)
-              .json({ error: 'Select at least one participant to split equally.' });
+              .json({ error: 'Select at least one person to split this bill.' });
             return;
           }
           for (const id of rawIds) {
             if (!validMemberSet.has(Number(id))) {
-              res.status(400).json({ error: 'Invalid participant selected.' });
+              res.status(400).json({ error: 'Invalid person selected.' });
               return;
             }
           }
@@ -573,12 +932,12 @@ async function startServer() {
                   amountMinor: number;
                 }>);
           if (!Array.isArray(rawCustom)) {
-            res.status(400).json({ error: 'customSplits array is required.' });
+            res.status(400).json({ error: 'Custom split amounts are required.' });
             return;
           }
           for (const item of rawCustom) {
             if (!validMemberSet.has(Number(item.memberId))) {
-              res.status(400).json({ error: 'Invalid participant in custom split.' });
+              res.status(400).json({ error: 'Invalid person in custom split.' });
               return;
             }
           }
@@ -594,7 +953,7 @@ async function startServer() {
         const receiptPath = req.file ? `/api/receipts/${req.file.filename}` : null;
         const now = new Date().toISOString();
 
-        const tx = db.transaction(() => {
+        const expenseId = db.transaction(() => {
           const expId = Number(
             db
               .prepare(
@@ -629,7 +988,7 @@ async function startServer() {
             payload: {
               title,
               category,
-              totalMinor,
+              amount: formatMinorToPkr(totalMinor),
               splitMode,
               paidByMemberId,
               splitCount: resolvedSplits.length,
@@ -639,116 +998,130 @@ async function startServer() {
           });
 
           return expId;
-        });
+        })();
 
-        const expenseId = tx();
         res.status(201).json({
           expenseId,
-          state: buildFullState(actor.memberId),
+          state: buildGroupState(actor.groupId, user.userId, actor.memberId),
         });
       } catch (err) {
         if (req.file) {
           fs.rmSync(req.file.path, { force: true });
         }
-        const message = err instanceof Error ? err.message : 'Failed to create expense.';
+        const message = err instanceof Error ? err.message : 'Failed to save bill.';
         res.status(400).json({ error: message });
       }
     },
   );
 
-  app.post('/api/expenses/:id/void', requireAuth, (req: AuthenticatedRequest, res) => {
-    const actor = req.authMember!;
-    const expenseId = Number(req.params.id);
-    const reason = String((req.body as { reason?: string }).reason ?? '').trim();
+  app.post(
+    '/api/groups/:groupId/expenses/:expenseId/void',
+    requireAuth,
+    requireGroupMember,
+    (req: AuthenticatedRequest, res) => {
+      const actor = req.authMember!;
+      const user = req.authUser!;
+      const expenseId = Number(req.params.expenseId);
+      const reason = String((req.body as { reason?: string }).reason ?? '').trim();
 
-    if (!Number.isInteger(expenseId) || expenseId <= 0) {
-      res.status(400).json({ error: 'Invalid expense ID.' });
-      return;
-    }
-    if (!reason || reason.length < 3) {
-      res.status(400).json({ error: 'A void reason (at least 3 characters) is required.' });
-      return;
-    }
+      if (!Number.isInteger(expenseId) || expenseId <= 0) {
+        res.status(400).json({ error: 'Invalid bill selected.' });
+        return;
+      }
+      if (!reason || reason.length < 3) {
+        res
+          .status(400)
+          .json({ error: 'Please enter a short reason (at least 3 characters).' });
+        return;
+      }
 
-    const expense = db
-      .prepare(
-        `SELECT id, group_id AS groupId, paid_by_member_id AS paidByMemberId, title, total_minor AS totalMinor, status
-         FROM expenses WHERE id = ? AND group_id = ?`,
-      )
-      .get(expenseId, actor.groupId) as
-      | {
-          id: number;
-          groupId: number;
-          paidByMemberId: number;
-          title: string;
-          totalMinor: number;
-          status: string;
-        }
-      | undefined;
+      const expense = db
+        .prepare(
+          `SELECT id, group_id AS groupId, paid_by_member_id AS paidByMemberId, title, total_minor AS totalMinor, status
+           FROM expenses WHERE id = ? AND group_id = ?`,
+        )
+        .get(expenseId, actor.groupId) as
+        | {
+            id: number;
+            groupId: number;
+            paidByMemberId: number;
+            title: string;
+            totalMinor: number;
+            status: string;
+          }
+        | undefined;
 
-    if (!expense) {
-      res.status(404).json({ error: 'Expense not found.' });
-      return;
-    }
-    if (expense.status === 'VOIDED') {
-      res.status(409).json({ error: 'Expense is already voided.' });
-      return;
-    }
+      if (!expense) {
+        res.status(404).json({ error: 'Bill not found.' });
+        return;
+      }
+      if (expense.status === 'VOIDED') {
+        res.status(409).json({ error: 'This bill has already been removed.' });
+        return;
+      }
 
-    const canVoid =
-      actor.role === 'HOST' ||
-      actor.role === 'ADMIN' ||
-      actor.memberId === expense.paidByMemberId;
+      const canVoid =
+        actor.role === 'HOST' ||
+        actor.role === 'ADMIN' ||
+        actor.memberId === expense.paidByMemberId;
 
-    if (!canVoid) {
-      res.status(403).json({
-        error: `Permission denied: ${actor.role} cannot void another member's expense. Only the payer, ADMIN, or HOST may void.`,
+      if (!canVoid) {
+        res.status(403).json({
+          error:
+            'Only the person who paid, a group Admin, or the Host can remove this bill.',
+        });
+        return;
+      }
+
+      const now = new Date().toISOString();
+      db.transaction(() => {
+        db.prepare(
+          `UPDATE expenses SET status = 'VOIDED', void_reason = ?, voided_by_member_id = ? WHERE id = ?`,
+        ).run(reason, actor.memberId, expense.id);
+
+        appendAuditLog(db, {
+          groupId: actor.groupId,
+          actorMemberId: actor.memberId,
+          actionType: 'EXPENSE_VOIDED',
+          entityType: 'EXPENSE',
+          entityId: expense.id,
+          payload: {
+            title: expense.title,
+            amount: formatMinorToPkr(expense.totalMinor),
+            reason,
+          },
+          createdAt: now,
+        });
+      })();
+
+      res.json({
+        state: buildGroupState(actor.groupId, user.userId, actor.memberId),
       });
-      return;
-    }
-
-    const now = new Date().toISOString();
-    db.transaction(() => {
-      db.prepare(
-        `UPDATE expenses SET status = 'VOIDED', void_reason = ?, voided_by_member_id = ? WHERE id = ?`,
-      ).run(reason, actor.memberId, expense.id);
-
-      appendAuditLog(db, {
-        groupId: actor.groupId,
-        actorMemberId: actor.memberId,
-        actionType: 'EXPENSE_VOIDED',
-        entityType: 'EXPENSE',
-        entityId: expense.id,
-        payload: {
-          title: expense.title,
-          totalMinor: expense.totalMinor,
-          reason,
-        },
-        createdAt: now,
-      });
-    })();
-
-    res.json({ state: buildFullState(actor.memberId) });
-  });
+    },
+  );
 
   app.post(
-    '/api/settlements',
+    '/api/groups/:groupId/settlements',
     requireAuth,
+    requireGroupMember,
     upload.single('receipt'),
     (req: AuthenticatedRequest, res) => {
       try {
         const actor = req.authMember!;
+        const user = req.authUser!;
         const body = req.body as Record<string, unknown>;
         const fromMemberId = Number(body.fromMemberId ?? actor.memberId);
         const toMemberId = Number(body.toMemberId);
         const note = String(body.note ?? '').trim() || null;
 
         if (!Number.isInteger(fromMemberId) || !Number.isInteger(toMemberId)) {
-          res.status(400).json({ error: 'Valid sender and recipient are required.' });
+          res.status(400).json({ error: 'Choose who paid and who received.' });
           return;
         }
         if (fromMemberId === toMemberId) {
-          res.status(400).json({ error: 'Sender and recipient cannot be the same member.' });
+          res
+            .status(400)
+            .json({ error: 'Sender and recipient cannot be the same person.' });
           return;
         }
 
@@ -760,7 +1133,7 @@ async function startServer() {
           fromMember.groupId !== actor.groupId ||
           toMember.groupId !== actor.groupId
         ) {
-          res.status(400).json({ error: 'Both members must belong to this group.' });
+          res.status(400).json({ error: 'Both people must belong to this group.' });
           return;
         }
 
@@ -769,13 +1142,13 @@ async function startServer() {
           actor.role === 'HOST' ||
           actor.role === 'ADMIN';
         if (!canInitiate) {
-          res.status(403).json({
-            error: 'Members can only initiate settlements from their own account.',
-          });
+          res
+            .status(403)
+            .json({ error: 'You can only record payments sent from your own account.' });
           return;
         }
 
-        const amountMinor = parsePkrToPaisa(String(body.amountPkr ?? ''));
+        const amountMinor = parsePkrToMinor(String(body.amountPkr ?? ''));
         const receiptPath = req.file ? `/api/receipts/${req.file.filename}` : null;
         const now = new Date().toISOString();
 
@@ -807,7 +1180,7 @@ async function startServer() {
             payload: {
               fromMemberId,
               toMemberId,
-              amountMinor,
+              amount: formatMinorToPkr(amountMinor),
               note,
               hasReceipt: Boolean(receiptPath),
             },
@@ -819,25 +1192,27 @@ async function startServer() {
 
         res.status(201).json({
           settlementId,
-          state: buildFullState(actor.memberId),
+          state: buildGroupState(actor.groupId, user.userId, actor.memberId),
         });
       } catch (err) {
         if (req.file) {
           fs.rmSync(req.file.path, { force: true });
         }
         const message =
-          err instanceof Error ? err.message : 'Failed to record settlement.';
+          err instanceof Error ? err.message : 'Failed to record payment.';
         res.status(400).json({ error: message });
       }
     },
   );
 
   app.post(
-    '/api/settlements/:id/confirm',
+    '/api/groups/:groupId/settlements/:settlementId/confirm',
     requireAuth,
+    requireGroupMember,
     (req: AuthenticatedRequest, res) => {
       const actor = req.authMember!;
-      const settlementId = Number(req.params.id);
+      const user = req.authUser!;
+      const settlementId = Number(req.params.settlementId);
       const st = db
         .prepare(
           `SELECT id, group_id AS groupId, from_member_id AS fromMemberId,
@@ -856,20 +1231,16 @@ async function startServer() {
         | undefined;
 
       if (!st) {
-        res.status(404).json({ error: 'Settlement not found.' });
+        res.status(404).json({ error: 'Payment not found.' });
         return;
       }
       if (st.status !== 'PENDING_CONFIRMATION') {
-        res
-          .status(409)
-          .json({ error: `Cannot confirm settlement in state ${st.status}.` });
+        res.status(409).json({ error: 'This payment is no longer pending.' });
         return;
       }
 
       if (actor.memberId === st.fromMemberId && actor.role === 'MEMBER') {
-        res.status(403).json({
-          error: 'Sender cannot confirm their own payment.',
-        });
+        res.status(403).json({ error: 'You cannot confirm your own outgoing payment.' });
         return;
       }
 
@@ -879,8 +1250,7 @@ async function startServer() {
         actor.role === 'ADMIN';
       if (!canConfirm) {
         res.status(403).json({
-          error:
-            'Only the payment recipient, ADMIN, or HOST can confirm this settlement.',
+          error: 'Only the recipient, Admin, or Host can confirm this payment.',
         });
         return;
       }
@@ -900,28 +1270,32 @@ async function startServer() {
           payload: {
             fromMemberId: st.fromMemberId,
             toMemberId: st.toMemberId,
-            amountMinor: st.amountMinor,
+            amount: formatMinorToPkr(st.amountMinor),
           },
           createdAt: now,
         });
       })();
 
-      res.json({ state: buildFullState(actor.memberId) });
+      res.json({
+        state: buildGroupState(actor.groupId, user.userId, actor.memberId),
+      });
     },
   );
 
   app.post(
-    '/api/settlements/:id/reject',
+    '/api/groups/:groupId/settlements/:settlementId/reject',
     requireAuth,
+    requireGroupMember,
     (req: AuthenticatedRequest, res) => {
       const actor = req.authMember!;
-      const settlementId = Number(req.params.id);
+      const user = req.authUser!;
+      const settlementId = Number(req.params.settlementId);
       const reason = String((req.body as { reason?: string }).reason ?? '').trim();
 
       if (!reason || reason.length < 3) {
         res
           .status(400)
-          .json({ error: 'A rejection reason (at least 3 characters) is required.' });
+          .json({ error: 'Please include a short reason for declining.' });
         return;
       }
 
@@ -943,13 +1317,11 @@ async function startServer() {
         | undefined;
 
       if (!st) {
-        res.status(404).json({ error: 'Settlement not found.' });
+        res.status(404).json({ error: 'Payment not found.' });
         return;
       }
       if (st.status !== 'PENDING_CONFIRMATION') {
-        res
-          .status(409)
-          .json({ error: `Cannot reject settlement in state ${st.status}.` });
+        res.status(409).json({ error: 'This payment is no longer pending.' });
         return;
       }
 
@@ -959,8 +1331,7 @@ async function startServer() {
         actor.role === 'ADMIN';
       if (!canReject) {
         res.status(403).json({
-          error:
-            'Only the payment recipient, ADMIN, or HOST can reject this settlement.',
+          error: 'Only the recipient, Admin, or Host can decline this payment.',
         });
         return;
       }
@@ -980,23 +1351,27 @@ async function startServer() {
           payload: {
             fromMemberId: st.fromMemberId,
             toMemberId: st.toMemberId,
-            amountMinor: st.amountMinor,
+            amount: formatMinorToPkr(st.amountMinor),
             reason,
           },
           createdAt: now,
         });
       })();
 
-      res.json({ state: buildFullState(actor.memberId) });
+      res.json({
+        state: buildGroupState(actor.groupId, user.userId, actor.memberId),
+      });
     },
   );
 
   app.post(
-    '/api/settlements/:id/cancel',
+    '/api/groups/:groupId/settlements/:settlementId/cancel',
     requireAuth,
+    requireGroupMember,
     (req: AuthenticatedRequest, res) => {
       const actor = req.authMember!;
-      const settlementId = Number(req.params.id);
+      const user = req.authUser!;
+      const settlementId = Number(req.params.settlementId);
       const st = db
         .prepare(
           `SELECT id, group_id AS groupId, from_member_id AS fromMemberId,
@@ -1015,13 +1390,11 @@ async function startServer() {
         | undefined;
 
       if (!st) {
-        res.status(404).json({ error: 'Settlement not found.' });
+        res.status(404).json({ error: 'Payment not found.' });
         return;
       }
       if (st.status !== 'PENDING_CONFIRMATION') {
-        res
-          .status(409)
-          .json({ error: `Cannot cancel settlement in state ${st.status}.` });
+        res.status(409).json({ error: 'This payment is no longer pending.' });
         return;
       }
 
@@ -1031,7 +1404,7 @@ async function startServer() {
         actor.role === 'ADMIN';
       if (!canCancel) {
         res.status(403).json({
-          error: 'Only the sender, ADMIN, or HOST can cancel a pending settlement.',
+          error: 'Only the sender, Admin, or Host can cancel this payment.',
         });
         return;
       }
@@ -1051,104 +1424,166 @@ async function startServer() {
           payload: {
             fromMemberId: st.fromMemberId,
             toMemberId: st.toMemberId,
-            amountMinor: st.amountMinor,
+            amount: formatMinorToPkr(st.amountMinor),
           },
           createdAt: now,
         });
       })();
 
-      res.json({ state: buildFullState(actor.memberId) });
+      res.json({
+        state: buildGroupState(actor.groupId, user.userId, actor.memberId),
+      });
     },
   );
 
-  app.post('/api/shadow/invite', requireAuth, (req: AuthenticatedRequest, res) => {
-    const actor = req.authMember!;
-    if (actor.role !== 'HOST' && actor.role !== 'ADMIN') {
-      res.status(403).json({
-        error: 'Only HOST or ADMIN can add shadow (ghost) members.',
-      });
-      return;
-    }
+  app.post(
+    '/api/groups/:groupId/shadow/invite',
+    requireAuth,
+    requireGroupMember,
+    (req: AuthenticatedRequest, res) => {
+      const actor = req.authMember!;
+      const user = req.authUser!;
+      if (actor.role !== 'HOST' && actor.role !== 'ADMIN') {
+        res.status(403).json({
+          error: 'Only a group Host or Admin can add an unregistered friend.',
+        });
+        return;
+      }
 
-    const name = String((req.body as { name?: string }).name ?? '').trim();
-    if (!name || name.length < 2 || name.length > 60) {
-      res.status(400).json({ error: 'Member name must be 2–60 characters.' });
-      return;
-    }
+      const name = String((req.body as { name?: string }).name ?? '').trim();
+      if (!name || name.length < 2 || name.length > 60) {
+        res.status(400).json({ error: 'Name must be 2–60 characters.' });
+        return;
+      }
 
-    try {
+      try {
+        const tokenRecord = verificationProvider.issueToken({
+          purpose: 'SHADOW_CLAIM',
+          recipientLabel: name,
+          detail: `Single-use invite code created by ${actor.name}`,
+          ttlMinutes: 60 * 72,
+        });
+
+        const now = new Date().toISOString();
+        const result = db.transaction(() => {
+          const userId = Number(
+            db
+              .prepare(
+                `INSERT INTO users (name, handle, password_hash, is_shadow, claim_token_hash, claim_token_expires_at, claimed_at, created_at)
+                 VALUES (?, NULL, NULL, 1, ?, ?, NULL, ?)`,
+              )
+              .run(
+                name,
+                hashClaimToken(tokenRecord.token),
+                tokenRecord.expiresAt,
+                now,
+              ).lastInsertRowid,
+          );
+
+          const memberId = Number(
+            db
+              .prepare(
+                `INSERT INTO group_members (group_id, user_id, role, joined_at)
+                 VALUES (?, ?, 'MEMBER', ?)`,
+              )
+              .run(actor.groupId, userId, now).lastInsertRowid,
+          );
+
+          appendAuditLog(db, {
+            groupId: actor.groupId,
+            actorMemberId: actor.memberId,
+            actionType: 'FRIEND_INVITED',
+            entityType: 'USER',
+            entityId: userId,
+            payload: {
+              name,
+              memberId,
+              expiresAt: tokenRecord.expiresAt,
+            },
+            createdAt: now,
+          });
+
+          return { userId, memberId };
+        })();
+
+        res.status(201).json({
+          memberId: result.memberId,
+          inviteCode: tokenRecord.token,
+          expiresAt: tokenRecord.expiresAt,
+          state: buildGroupState(actor.groupId, user.userId, actor.memberId),
+        });
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : 'Failed to create invite.';
+        res.status(400).json({ error: message });
+      }
+    },
+  );
+
+  app.post(
+    '/api/groups/:groupId/shadow/:memberId/reissue',
+    requireAuth,
+    requireGroupMember,
+    (req: AuthenticatedRequest, res) => {
+      const actor = req.authMember!;
+      const user = req.authUser!;
+      if (actor.role !== 'HOST' && actor.role !== 'ADMIN') {
+        res
+          .status(403)
+          .json({ error: 'Only a group Host or Admin can reissue an invite code.' });
+        return;
+      }
+
+      const targetMemberId = Number(req.params.memberId);
+      const target = loadGroupMemberById(targetMemberId);
+      if (!target || target.groupId !== actor.groupId || !target.isShadow) {
+        res.status(404).json({ error: 'Unclaimed roommate profile not found.' });
+        return;
+      }
+
       const tokenRecord = verificationProvider.issueToken({
         purpose: 'SHADOW_CLAIM',
-        recipientLabel: `${name} (Shadow)`,
-        detail: `Single-use claim token created by ${actor.name}`,
+        recipientLabel: target.name,
+        detail: `Reissued invite code by ${actor.name}`,
         ttlMinutes: 60 * 72,
       });
 
       const now = new Date().toISOString();
-      const result = db.transaction(() => {
-        const userId = Number(
-          db
-            .prepare(
-              `INSERT INTO users (name, handle, password_hash, is_shadow, claim_token_hash, claim_token_expires_at, claimed_at, created_at)
-               VALUES (?, NULL, NULL, 1, ?, ?, NULL, ?)`,
-            )
-            .run(
-              name,
-              hashClaimToken(tokenRecord.token),
-              tokenRecord.expiresAt,
-              now,
-            ).lastInsertRowid,
-        );
-
-        const memberId = Number(
-          db
-            .prepare(
-              `INSERT INTO group_members (group_id, user_id, role, joined_at)
-               VALUES (?, ?, 'MEMBER', ?)`,
-            )
-            .run(actor.groupId, userId, now).lastInsertRowid,
-        );
+      db.transaction(() => {
+        db.prepare(
+          `UPDATE users SET claim_token_hash = ?, claim_token_expires_at = ? WHERE id = ? AND is_shadow = 1`,
+        ).run(hashClaimToken(tokenRecord.token), tokenRecord.expiresAt, target.userId);
 
         appendAuditLog(db, {
           groupId: actor.groupId,
           actorMemberId: actor.memberId,
-          actionType: 'SHADOW_MEMBER_INVITED',
+          actionType: 'INVITE_CODE_REISSUED',
           entityType: 'USER',
-          entityId: userId,
-          payload: {
-            name,
-            memberId,
-            tokenExpiresAt: tokenRecord.expiresAt,
-          },
+          entityId: target.userId,
+          payload: { name: target.name },
           createdAt: now,
         });
-
-        return { userId, memberId };
       })();
 
-      res.status(201).json({
-        memberId: result.memberId,
-        claimToken:
-          verificationProvider.mode === 'dev_mock' ? tokenRecord.token : null,
+      res.json({
+        memberId: target.memberId,
+        inviteCode: tokenRecord.token,
         expiresAt: tokenRecord.expiresAt,
-        state: buildFullState(actor.memberId),
+        state: buildGroupState(actor.groupId, user.userId, actor.memberId),
       });
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : 'Failed to invite shadow member.';
-      res.status(400).json({ error: message });
-    }
-  });
+    },
+  );
 
   app.post('/api/shadow/claim', (req, res) => {
-    const { claimToken, handle, password, displayName } = req.body as {
+    const { inviteCode, claimToken, handle, password, displayName } = req.body as {
+      inviteCode?: string;
       claimToken?: string;
       handle?: string;
       password?: string;
       displayName?: string;
     };
 
-    const rawToken = String(claimToken ?? '').trim();
+    const rawToken = String(inviteCode ?? claimToken ?? '').trim();
     const cleanHandle = String(handle ?? '')
       .trim()
       .replace(/^@/, '')
@@ -1156,12 +1591,12 @@ async function startServer() {
     const rawPassword = String(password ?? '');
 
     if (!rawToken) {
-      res.status(400).json({ error: 'Single-use claim token is required.' });
+      res.status(400).json({ error: 'Invite code is required.' });
       return;
     }
     if (!/^[a-z0-9_]{3,24}$/.test(cleanHandle)) {
       res.status(400).json({
-        error: 'Handle must be 3–24 lowercase letters, numbers, or underscores.',
+        error: 'Username must be 3–24 lowercase letters, numbers, or underscores.',
       });
       return;
     }
@@ -1198,24 +1633,24 @@ async function startServer() {
 
         if (!userRow) {
           throw new Error(
-            'Claim token is invalid, expired, or has already been claimed.',
+            'Invite code is invalid, expired, or has already been used.',
           );
         }
         if (userRow.isShadow !== 1 || userRow.claimedAt !== null) {
-          throw new Error('This shadow account has already been claimed and locked.');
+          throw new Error('This profile has already been claimed.');
         }
         if (
           userRow.expiresAt &&
           new Date(userRow.expiresAt).getTime() <= Date.now()
         ) {
-          throw new Error('This claim token has expired. Ask a HOST/ADMIN for a new invite.');
+          throw new Error('This invite code has expired. Ask the group Host for a new one.');
         }
 
         const handleConflict = db
           .prepare(`SELECT id FROM users WHERE LOWER(handle) = ? AND id != ?`)
           .get(cleanHandle, userRow.userId) as { id: number } | undefined;
         if (handleConflict) {
-          throw new Error(`Handle @${cleanHandle} is already taken.`);
+          throw new Error(`Username @${cleanHandle} is already taken.`);
         }
 
         const updatedName =
@@ -1233,19 +1668,18 @@ async function startServer() {
           .run(updatedName, cleanHandle, hashPassword(rawPassword), now, userRow.userId);
 
         if (updateResult.changes !== 1) {
-          throw new Error('Account claim conflict — takeover prevented.');
+          throw new Error('This profile has already been claimed.');
         }
 
         appendAuditLog(db, {
           groupId: userRow.groupId,
           actorMemberId: userRow.memberId,
-          actionType: 'SHADOW_MEMBER_CLAIMED',
+          actionType: 'INVITE_CLAIMED',
           entityType: 'USER',
           entityId: userRow.userId,
           payload: {
             name: updatedName,
             handle: cleanHandle,
-            preservedMemberId: userRow.memberId,
           },
           createdAt: now,
         });
@@ -1255,37 +1689,42 @@ async function startServer() {
           memberId: userRow.memberId,
           groupId: userRow.groupId,
           name: updatedName,
+          handle: cleanHandle,
         };
       })();
 
       verificationProvider.consumeToken(rawToken);
-      const token = signSessionToken({
-        userId: claimed.userId,
-        memberId: claimed.memberId,
-        groupId: claimed.groupId,
-      });
+      const token = signSessionToken(claimed.userId);
 
       res.json({
         token,
-        claimedMember: loadGroupMemberById(claimed.memberId),
-        state: buildFullState(claimed.memberId),
+        user: {
+          userId: claimed.userId,
+          name: claimed.name,
+          handle: claimed.handle,
+        },
+        activeGroupId: claimed.groupId,
+        groups: loadUserGroups(claimed.userId),
+        state: buildGroupState(claimed.groupId, claimed.userId, claimed.memberId),
       });
     } catch (err) {
       const message =
-        err instanceof Error ? err.message : 'Unable to claim shadow account.';
+        err instanceof Error ? err.message : 'Unable to claim invite code.';
       res.status(409).json({ error: message });
     }
   });
 
   app.patch(
-    '/api/reminders/settings',
+    '/api/groups/:groupId/reminders/settings',
     requireAuth,
+    requireGroupMember,
     (req: AuthenticatedRequest, res) => {
       const actor = req.authMember!;
+      const user = req.authUser!;
       if (actor.role !== 'HOST' && actor.role !== 'ADMIN') {
         res
           .status(403)
-          .json({ error: 'Only HOST or ADMIN can change reminder rules.' });
+          .json({ error: 'Only a group Host or Admin can update reminder settings.' });
         return;
       }
 
@@ -1311,7 +1750,7 @@ async function startServer() {
         cooldown < 1 ||
         cooldown > 168
       ) {
-        res.status(400).json({ error: 'Invalid quiet hours or cooldown duration.' });
+        res.status(400).json({ error: 'Invalid quiet hours or cooldown hours.' });
         return;
       }
 
@@ -1327,182 +1766,160 @@ async function startServer() {
           actionType: 'REMINDER_SETTINGS_UPDATED',
           entityType: 'GROUP',
           entityId: actor.groupId,
-          payload: { qStart, qEnd, cooldown },
+          payload: { quietHoursStart: qStart, quietHoursEnd: qEnd, cooldownHours: cooldown },
           createdAt: now,
         });
       })();
 
-      res.json({ state: buildFullState(actor.memberId) });
+      res.json({
+        state: buildGroupState(actor.groupId, user.userId, actor.memberId),
+      });
     },
   );
 
-  app.post('/api/reminders/snooze', requireAuth, (req: AuthenticatedRequest, res) => {
-    const actor = req.authMember!;
-    const hours = Number((req.body as { hours?: number }).hours ?? 12);
-    if (!Number.isInteger(hours) || hours < 0 || hours > 168) {
-      res.status(400).json({ error: 'Snooze duration must be 0–168 hours.' });
-      return;
-    }
+  app.post(
+    '/api/groups/:groupId/reminders/snooze',
+    requireAuth,
+    requireGroupMember,
+    (req: AuthenticatedRequest, res) => {
+      const actor = req.authMember!;
+      const user = req.authUser!;
+      const hours = Number((req.body as { hours?: number }).hours ?? 12);
+      if (!Number.isInteger(hours) || hours < 0 || hours > 168) {
+        res.status(400).json({ error: 'Snooze hours must be between 0 and 168.' });
+        return;
+      }
 
-    const now = new Date();
-    const snoozedUntil =
-      hours === 0
-        ? null
-        : new Date(now.getTime() + hours * 3600 * 1000).toISOString();
+      const now = new Date();
+      const snoozedUntil =
+        hours === 0
+          ? null
+          : new Date(now.getTime() + hours * 3600 * 1000).toISOString();
 
-    db.transaction(() => {
-      db.prepare(`UPDATE group_members SET snoozed_until = ? WHERE id = ?`).run(
-        snoozedUntil,
-        actor.memberId,
-      );
-
-      appendAuditLog(db, {
-        groupId: actor.groupId,
-        actorMemberId: actor.memberId,
-        actionType: hours === 0 ? 'REMINDER_UNSNOOZED' : 'REMINDER_SNOOZED',
-        entityType: 'MEMBER',
-        entityId: actor.memberId,
-        payload: { hours, snoozedUntil },
-        createdAt: now.toISOString(),
-      });
-    })();
-
-    res.json({ state: buildFullState(actor.memberId) });
-  });
-
-  app.post('/api/reminders/send', requireAuth, (req: AuthenticatedRequest, res) => {
-    const actor = req.authMember!;
-    if (actor.role !== 'HOST' && actor.role !== 'ADMIN') {
-      res.status(403).json({
-        error: 'Only HOST or ADMIN can dispatch batched summary reminders.',
-      });
-      return;
-    }
-
-    const { testHour } = req.body as { testHour?: number };
-    const stateBefore = buildFullState(actor.memberId);
-    const now = new Date();
-    const results: Array<{
-      memberId: number;
-      name: string;
-      status: 'SENT' | 'SUPPRESSED';
-      reason: string;
-      summaryText?: string;
-    }> = [];
-
-    try {
       db.transaction(() => {
-        for (const member of stateBefore.members) {
-          const net = stateBefore.balances.netBalances.find(
-            (n) => n.memberId === member.memberId,
-          );
-          if (!net || net.netMinor >= 0) continue;
-
-          const evalRes = evaluateReminderEligibility(
-            stateBefore.group.quietHoursStart,
-            stateBefore.group.quietHoursEnd,
-            stateBefore.group.reminderCooldownHours,
-            member.snoozedUntil,
-            member.lastRemindedAt,
-            now,
-            typeof testHour === 'number' ? testHour : undefined,
-          );
-
-          if (!evalRes.eligible) {
-            results.push({
-              memberId: member.memberId,
-              name: member.name,
-              status: 'SUPPRESSED',
-              reason: evalRes.reason,
-            });
-            continue;
-          }
-
-          const transfers = stateBefore.balances.simplifiedPlan
-            .filter((t) => t.fromMemberId === member.memberId)
-            .map((t) => `${formatPaisaToPkr(t.amountMinor)} to ${t.toName}`);
-
-          const summaryText = `Batched FairShare Summary for ${member.name}: Net owed ${formatPaisaToPkr(Math.abs(net.netMinor))} (${transfers.join(', ')})`;
-
-          verificationProvider.sendBatchSummary({
-            recipientLabel: member.name,
-            summaryText,
-          });
-
-          db.prepare(
-            `UPDATE group_members SET last_reminded_at = ? WHERE id = ?`,
-          ).run(now.toISOString(), member.memberId);
-
-          results.push({
-            memberId: member.memberId,
-            name: member.name,
-            status: 'SENT',
-            reason: 'Batched summary reminder logged.',
-            summaryText,
-          });
-        }
+        db.prepare(`UPDATE group_members SET snoozed_until = ? WHERE id = ?`).run(
+          snoozedUntil,
+          actor.memberId,
+        );
 
         appendAuditLog(db, {
           groupId: actor.groupId,
           actorMemberId: actor.memberId,
-          actionType: 'REMINDER_BATCH_PROCESSED',
-          entityType: 'GROUP',
-          entityId: actor.groupId,
-          payload: {
-            sentCount: results.filter((r) => r.status === 'SENT').length,
-            suppressedCount: results.filter((r) => r.status === 'SUPPRESSED')
-              .length,
-            testedHour: typeof testHour === 'number' ? testHour : now.getHours(),
-          },
+          actionType: hours === 0 ? 'REMINDER_UNSNOOZED' : 'REMINDER_SNOOZED',
+          entityType: 'MEMBER',
+          entityId: actor.memberId,
+          payload: { hours, snoozedUntil },
           createdAt: now.toISOString(),
         });
       })();
 
       res.json({
-        results,
-        state: buildFullState(actor.memberId),
+        state: buildGroupState(actor.groupId, user.userId, actor.memberId),
       });
-    } catch (err) {
-      const message =
-        err instanceof Error ? err.message : 'Failed to send reminders.';
-      res.status(400).json({ error: message });
-    }
-  });
+    },
+  );
 
-  app.post('/api/demo/reset', (_req, res) => {
-    // Clean uploaded receipts safely inside UPLOADS_DIR
-    if (fs.existsSync(UPLOADS_DIR)) {
-      for (const file of fs.readdirSync(UPLOADS_DIR)) {
-        const target = path.resolve(UPLOADS_DIR, file);
-        if (target.startsWith(UPLOADS_DIR + path.sep)) {
-          fs.rmSync(target, { force: true });
-        }
+  app.post(
+    '/api/groups/:groupId/reminders/send',
+    requireAuth,
+    requireGroupMember,
+    (req: AuthenticatedRequest, res) => {
+      const actor = req.authMember!;
+      const user = req.authUser!;
+      if (actor.role !== 'HOST' && actor.role !== 'ADMIN') {
+        res.status(403).json({
+          error: 'Only a group Host or Admin can send summary reminders.',
+        });
+        return;
       }
-    }
 
-    const seeded = seedDemoData(db, verificationProvider);
-    const hostRow = db
-      .prepare(
-        `SELECT gm.id AS memberId, gm.user_id AS userId, gm.group_id AS groupId
-         FROM group_members gm
-         WHERE gm.group_id = ? AND gm.role = 'HOST'
-         LIMIT 1`,
-      )
-      .get(seeded.groupId) as {
-      memberId: number;
-      userId: number;
-      groupId: number;
-    };
+      const stateBefore = buildGroupState(actor.groupId, user.userId, actor.memberId);
+      const now = new Date();
+      const results: Array<{
+        memberId: number;
+        name: string;
+        status: 'SENT' | 'SUPPRESSED';
+        reason: string;
+        summaryText?: string;
+      }> = [];
 
-    const token = signSessionToken(hostRow);
-    res.json({
-      token,
-      member: loadGroupMemberById(hostRow.memberId),
-      state: buildFullState(hostRow.memberId),
-    });
-  });
+      try {
+        db.transaction(() => {
+          for (const member of stateBefore.members) {
+            const net = stateBefore.balances.netBalances.find(
+              (n) => n.memberId === member.memberId,
+            );
+            if (!net || net.netMinor >= 0) continue;
 
-  // Express error handler (including multer validation errors)
+            const evalRes = evaluateReminderEligibility(
+              stateBefore.group.quietHoursStart,
+              stateBefore.group.quietHoursEnd,
+              stateBefore.group.reminderCooldownHours,
+              member.snoozedUntil,
+              member.lastRemindedAt,
+              now,
+            );
+
+            if (!evalRes.eligible) {
+              results.push({
+                memberId: member.memberId,
+                name: member.name,
+                status: 'SUPPRESSED',
+                reason: evalRes.reason,
+              });
+              continue;
+            }
+
+            const transfers = stateBefore.balances.simplifiedPlan
+              .filter((t) => t.fromMemberId === member.memberId)
+              .map((t) => `${formatMinorToPkr(t.amountMinor)} to ${t.toName}`);
+
+            const summaryText = `Summary for ${member.name}: Total owed ${formatMinorToPkr(Math.abs(net.netMinor))} (${transfers.join(', ')})`;
+
+            verificationProvider.sendBatchSummary({
+              recipientLabel: member.name,
+              summaryText,
+            });
+
+            db.prepare(
+              `UPDATE group_members SET last_reminded_at = ? WHERE id = ?`,
+            ).run(now.toISOString(), member.memberId);
+
+            results.push({
+              memberId: member.memberId,
+              name: member.name,
+              status: 'SENT',
+              reason: 'Summary reminder sent.',
+              summaryText,
+            });
+          }
+
+          appendAuditLog(db, {
+            groupId: actor.groupId,
+            actorMemberId: actor.memberId,
+            actionType: 'REMINDER_BATCH_SENT',
+            entityType: 'GROUP',
+            entityId: actor.groupId,
+            payload: {
+              sentCount: results.filter((r) => r.status === 'SENT').length,
+              suppressedCount: results.filter((r) => r.status === 'SUPPRESSED').length,
+            },
+            createdAt: now.toISOString(),
+          });
+        })();
+
+        res.json({
+          results,
+          state: buildGroupState(actor.groupId, user.userId, actor.memberId),
+        });
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : 'Failed to send reminders.';
+        res.status(400).json({ error: message });
+      }
+    },
+  );
+
   app.use(
     (
       err: unknown,
@@ -1531,9 +1948,7 @@ async function startServer() {
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(
-      `FairShare Ledger running on http://0.0.0.0:${PORT} (verification=${verificationProvider.mode})`,
-    );
+    console.log(`FairShare Ledger listening on http://0.0.0.0:${PORT}`);
   });
 }
 

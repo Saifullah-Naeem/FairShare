@@ -4,9 +4,7 @@ import {
   Bell,
   BellOff,
   CheckCircle2,
-  Clock,
   Send,
-  ShieldCheck,
   SlidersHorizontal,
 } from 'lucide-react';
 import type { LedgerState, TransferEdge } from '../../types/ledger';
@@ -21,7 +19,7 @@ interface BalancesPlanScreenProps {
     reminderCooldownHours: number;
   }) => Promise<void>;
   onSnooze: (hours: number) => Promise<void>;
-  onSendReminders: (testHour?: number) => Promise<
+  onSendReminders: () => Promise<
     Array<{
       memberId: number;
       name: string;
@@ -47,7 +45,7 @@ export const BalancesPlanScreen: React.FC<BalancesPlanScreenProps> = ({
   const [cooldownHours, setCooldownHours] = useState(
     state.group.reminderCooldownHours,
   );
-  const [testHourInput, setTestHourInput] = useState<string>('');
+  const [showReminderSettings, setShowReminderSettings] = useState(false);
   const [dispatchLog, setDispatchLog] = useState<
     Array<{
       memberId: number;
@@ -70,153 +68,77 @@ export const BalancesPlanScreen: React.FC<BalancesPlanScreenProps> = ({
       : state.balances.rawPairBalances;
 
   return (
-    <div className="space-y-6">
-      {/* Net Balances Ledger Table */}
-      <section className="rounded-2xl bg-[#131C2E] border border-slate-800 p-5 space-y-4">
-        <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-          <div>
-            <h2 className="font-display text-lg font-semibold text-slate-100">
-              Zero-Sum Net Balances
-            </h2>
-            <p className="text-xs text-slate-400">
-              Positive means others owe this roommate; negative means this roommate owes the group.
-            </p>
-          </div>
-          <div className="flex items-center gap-2 text-xs text-emerald-400 font-mono">
-            <ShieldCheck className="w-4 h-4 shrink-0" />
-            <span>Sum Check: {formatPkr(state.balances.zeroSumCheckMinor)}</span>
-          </div>
-        </div>
-
-        <div className="overflow-x-auto -mx-2 px-2">
-          <table className="w-full text-left border-collapse min-w-[540px]">
-            <thead>
-              <tr className="border-b border-slate-800 text-xs text-slate-400 font-medium">
-                <th className="py-2.5 pr-3">Member</th>
-                <th className="py-2.5 px-3 text-right">Paid</th>
-                <th className="py-2.5 px-3 text-right">Expense Share</th>
-                <th className="py-2.5 px-3 text-right">Settled Net</th>
-                <th className="py-2.5 pl-3 text-right">Net Balance</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-800/80 text-sm">
-              {state.balances.netBalances.map((row) => {
-                const settledNet = row.settledOutMinor - row.settledInMinor;
-                return (
-                  <tr key={row.memberId} className="hover:bg-slate-800/30">
-                    <td className="py-3 pr-3">
-                      <div className="font-medium text-slate-100">{row.name}</div>
-                      <div className="text-xs text-slate-500">
-                        {row.role} · {row.isShadow ? 'Shadow' : `@${row.handle}`}
-                      </div>
-                    </td>
-                    <td className="py-3 px-3 text-right font-mono text-slate-300">
-                      {formatPkr(row.paidMinor)}
-                    </td>
-                    <td className="py-3 px-3 text-right font-mono text-slate-300">
-                      {formatPkr(row.owedMinor)}
-                    </td>
-                    <td className="py-3 px-3 text-right font-mono text-slate-400">
-                      {formatPkr(settledNet)}
-                    </td>
-                    <td className="py-3 pl-3 text-right">
-                      <div
-                        className={`font-mono font-semibold ${
-                          row.netMinor === 0
-                            ? 'text-slate-300'
-                            : row.netMinor > 0
-                              ? 'text-emerald-400'
-                              : 'text-rose-400'
-                        }`}
-                      >
-                        {formatPkr(row.netMinor)}
-                      </div>
-                      <div className="text-[11px] text-slate-500">
-                        {row.netMinor > 0
-                          ? 'Owed to member'
-                          : row.netMinor < 0
-                            ? 'Owes group'
-                            : 'Settled'}
-                      </div>
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
-      </section>
-
-      {/* Settlement Plan vs Raw Pair Balances */}
-      <section className="rounded-2xl bg-[#131C2E] border border-slate-800 p-5 space-y-4">
+    <div className="space-y-4">
+      {/* Settlement Plan vs By Person (Mint Card) */}
+      <section className="rounded-3xl bg-[#EFFBF5]/95 border border-emerald-200/80 p-5 space-y-4 shadow-xs">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div>
-            <h3 className="font-display text-base font-semibold text-slate-100">
+            <h2 className="font-display text-lg font-bold text-slate-900">
               {planView === 'simplified'
-                ? 'Simplified Debt-Settlement Plan'
-                : 'Raw Pairwise Balances'}
-            </h3>
-            <p className="text-xs text-slate-400">
+                ? 'Best Settlement Plan'
+                : 'Direct Balances By Person'}
+            </h2>
+            <p className="text-xs text-slate-600">
               {planView === 'simplified'
-                ? `Minimizes transfers to ${state.balances.simplifiedPlan.length} payments to clear all group debts.`
-                : `Shows direct pairwise obligations (${state.balances.rawPairBalances.length} pairs) before graph simplification.`}
+                ? `Settle the whole group in just ${state.balances.simplifiedPlan.length} payments.`
+                : 'Shows every direct person-to-person balance.'}
             </p>
           </div>
 
-          <div className="inline-flex items-center p-1 rounded-xl bg-slate-900 border border-slate-800 self-start">
+          <div className="inline-flex items-center p-1 rounded-2xl bg-white/80 border border-emerald-200 self-start">
             <button
               type="button"
               onClick={() => setPlanView('simplified')}
-              className={`min-h-[38px] px-3 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${
+              className={`min-h-[40px] px-3.5 py-1.5 rounded-xl text-xs font-semibold transition-colors whitespace-nowrap ${
                 planView === 'simplified'
-                  ? 'bg-emerald-600 text-white'
-                  : 'text-slate-400 hover:text-slate-100'
+                  ? 'bg-emerald-700 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              Simplified ({state.balances.simplifiedPlan.length})
+              Best Plan ({state.balances.simplifiedPlan.length})
             </button>
             <button
               type="button"
               onClick={() => setPlanView('raw')}
-              className={`min-h-[38px] px-3 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${
+              className={`min-h-[40px] px-3.5 py-1.5 rounded-xl text-xs font-semibold transition-colors whitespace-nowrap ${
                 planView === 'raw'
-                  ? 'bg-emerald-600 text-white'
-                  : 'text-slate-400 hover:text-slate-100'
+                  ? 'bg-violet-700 text-white shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              Raw Pairs ({state.balances.rawPairBalances.length})
+              By Person ({state.balances.rawPairBalances.length})
             </button>
           </div>
         </div>
 
         {activeTransfers.length === 0 ? (
-          <div className="py-8 text-center text-sm text-slate-400 flex flex-col items-center gap-2">
-            <CheckCircle2 className="w-6 h-6 text-emerald-400" />
-            <span>Everyone in the group is completely settled up.</span>
+          <div className="py-8 text-center text-sm text-slate-600 flex flex-col items-center gap-2">
+            <CheckCircle2 className="w-7 h-7 text-emerald-700" />
+            <span>Everyone is completely settled up.</span>
           </div>
         ) : (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             {activeTransfers.map((edge) => (
               <div
                 key={`${edge.fromMemberId}-${edge.toMemberId}`}
-                className="rounded-xl bg-slate-900/70 border border-slate-800 p-4 flex items-center justify-between gap-3"
+                className="rounded-2xl bg-gradient-to-r from-white/85 to-[#F4F0FD]/90 border border-emerald-200/70 p-4 flex items-center justify-between gap-3"
               >
                 <div className="min-w-0">
-                  <div className="flex items-center gap-2 text-sm font-medium text-slate-100">
+                  <div className="flex items-center gap-1.5 text-sm font-semibold text-slate-900">
                     <span className="truncate">{edge.fromName}</span>
-                    <ArrowRight className="w-4 h-4 text-emerald-400 shrink-0" />
+                    <ArrowRight className="w-4 h-4 text-emerald-700 shrink-0" />
                     <span className="truncate">{edge.toName}</span>
                   </div>
-                  <div className="mt-1 font-mono text-base font-bold text-emerald-300">
+                  <div className="mt-1 font-mono tabular-nums text-base font-bold text-emerald-800">
                     {formatPkr(edge.amountMinor)}
                   </div>
                 </div>
                 <button
                   type="button"
                   onClick={() => onStartSettle(edge)}
-                  className="min-h-[40px] px-3.5 py-2 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-xs font-semibold text-emerald-300 whitespace-nowrap shrink-0"
+                  className="min-h-[44px] px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-700 to-violet-700 hover:from-emerald-600 hover:to-violet-600 text-white text-xs font-semibold whitespace-nowrap shrink-0"
                 >
-                  Record Payment
+                  Pay Now
                 </button>
               </div>
             ))}
@@ -224,132 +146,196 @@ export const BalancesPlanScreen: React.FC<BalancesPlanScreenProps> = ({
         )}
       </section>
 
-      {/* Non-Spam Reminders (Quiet Hours, Cooldown, Snooze, Batched Summary) */}
-      <section className="rounded-2xl bg-[#131C2E] border border-slate-800 p-5 space-y-5">
+      {/* Everyone's Net Position (Lilac Card) */}
+      <section className="rounded-3xl bg-[#F4F0FD]/95 border border-violet-200/80 p-5 space-y-3 shadow-xs">
+        <div>
+          <h3 className="font-display text-base font-bold text-slate-900">
+            Everyone&apos;s Balance
+          </h3>
+          <p className="text-xs text-slate-600">
+            Total paid minus their share of group bills and confirmed payments.
+          </p>
+        </div>
+
+        <div data-no-swipe="true" className="overflow-x-auto -mx-2 px-2">
+          <table className="w-full text-left border-collapse min-w-[480px]">
+            <thead>
+              <tr className="border-b border-violet-200/70 text-xs text-slate-600 font-semibold">
+                <th className="py-2.5 pr-3">Person</th>
+                <th className="py-2.5 px-3 text-right">Paid</th>
+                <th className="py-2.5 px-3 text-right">Share</th>
+                <th className="py-2.5 pl-3 text-right">Net Balance</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-violet-200/50 text-sm">
+              {state.balances.netBalances.map((row) => (
+                <tr key={row.memberId}>
+                  <td className="py-3 pr-3">
+                    <div className="font-semibold text-slate-900">{row.name}</div>
+                    <div className="text-xs text-slate-600">
+                      {row.isShadow ? 'Invited friend' : `@${row.handle}`}
+                    </div>
+                  </td>
+                  <td className="py-3 px-3 text-right font-mono tabular-nums text-slate-700">
+                    {formatPkr(row.paidMinor)}
+                  </td>
+                  <td className="py-3 px-3 text-right font-mono tabular-nums text-slate-700">
+                    {formatPkr(row.owedMinor)}
+                  </td>
+                  <td className="py-3 pl-3 text-right">
+                    <div
+                      className={`font-mono tabular-nums font-bold ${
+                        row.netMinor === 0
+                          ? 'text-slate-700'
+                          : row.netMinor > 0
+                            ? 'text-emerald-700'
+                            : 'text-rose-600'
+                      }`}
+                    >
+                      {formatPkr(row.netMinor)}
+                    </div>
+                    <div className="text-[11px] text-slate-500">
+                      {row.netMinor > 0
+                        ? 'Gets back'
+                        : row.netMinor < 0
+                          ? 'Owes'
+                          : 'Settled'}
+                    </div>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      {/* Gentle Reminders (Mint Card) */}
+      <section className="rounded-3xl bg-[#EFFBF5]/95 border border-emerald-200/80 p-5 space-y-4 shadow-xs">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div>
-            <h3 className="font-display text-base font-semibold text-slate-100 flex items-center gap-2">
-              <Bell className="w-4 h-4 text-emerald-400" />
-              <span>Non-Spam Batched Reminders</span>
+            <h3 className="font-display text-base font-bold text-slate-900 flex items-center gap-2">
+              <Bell className="w-4 h-4 text-violet-700" />
+              <span>Gentle Reminders</span>
             </h3>
-            <p className="text-xs text-slate-400 mt-0.5">
-              Enforces quiet hours ({String(state.group.quietHoursStart).padStart(2, '0')}:00–{String(state.group.quietHoursEnd).padStart(2, '0')}:00), {state.group.reminderCooldownHours}h cooldown, and personal snooze before sending a single batched summary.
+            <p className="text-xs text-slate-600 mt-0.5">
+              Quiet hours {String(state.group.quietHoursStart).padStart(2, '0')}:00–
+              {String(state.group.quietHoursEnd).padStart(2, '0')}:00 ·{' '}
+              {state.group.reminderCooldownHours}h cooldown
             </p>
           </div>
 
-          {currentMember && (
-            <div className="flex items-center gap-2 shrink-0">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void onSnooze(12)}
+              className="min-h-[44px] px-3.5 py-1.5 rounded-xl border border-emerald-200 bg-white/80 text-xs font-semibold text-slate-700 hover:bg-white flex items-center gap-1.5 whitespace-nowrap"
+            >
+              <BellOff className="w-3.5 h-3.5 text-amber-600" />
+              <span>Snooze 12h</span>
+            </button>
+            {currentMember?.snoozedUntil && (
               <button
                 type="button"
                 disabled={busy}
-                onClick={() => void onSnooze(12)}
-                className="min-h-[40px] px-3 py-1.5 rounded-xl border border-slate-700 bg-slate-900 text-xs font-medium text-slate-200 hover:border-slate-600 flex items-center gap-1.5 whitespace-nowrap"
+                onClick={() => void onSnooze(0)}
+                className="min-h-[44px] px-3.5 py-1.5 rounded-xl border border-emerald-200 bg-white/80 text-xs font-semibold text-slate-700"
               >
-                <BellOff className="w-3.5 h-3.5 text-amber-400" />
-                <span>Snooze Mine (12h)</span>
+                Resume
               </button>
-              {currentMember.snoozedUntil && (
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => void onSnooze(0)}
-                  className="min-h-[40px] px-3 py-1.5 rounded-xl border border-slate-700 text-xs text-slate-300 hover:text-white whitespace-nowrap"
-                >
-                  Unsnooze
-                </button>
-              )}
-            </div>
-          )}
+            )}
+            {isHostOrAdmin && (
+              <button
+                type="button"
+                onClick={() => setShowReminderSettings((v) => !v)}
+                className="min-h-[44px] px-3.5 py-1.5 rounded-xl border border-violet-200 bg-[#F4F0FD] text-xs font-semibold text-violet-800 flex items-center gap-1.5"
+              >
+                <SlidersHorizontal className="w-3.5 h-3.5" />
+                <span>Rules</span>
+              </button>
+            )}
+          </div>
         </div>
 
-        {/* Debtor Eligibility Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
           {state.reminderStatuses
             .filter((r) => r.owedMinor > 0)
             .map((r) => (
               <div
                 key={r.memberId}
-                className="rounded-xl bg-slate-900/70 border border-slate-800 p-3.5 flex items-start justify-between gap-3"
+                className="rounded-2xl bg-white/80 border border-emerald-200/70 p-3.5 flex items-start justify-between gap-3"
               >
-                <div className="min-w-0">
-                  <div className="text-sm font-medium text-slate-100">
+                <div>
+                  <div className="text-sm font-semibold text-slate-900">
                     {r.name}{' '}
-                    <span className="font-mono text-xs text-rose-400 ml-1">
+                    <span className="font-mono tabular-nums text-xs text-rose-600 ml-1">
                       owes {formatPkr(r.owedMinor)}
                     </span>
                   </div>
-                  <p className="text-xs text-slate-400 mt-1">{r.reason}</p>
+                  <p className="text-xs text-slate-600 mt-0.5">{r.reason}</p>
                   {r.nextAllowedAt && (
                     <p className="text-[11px] text-slate-500 mt-0.5 font-mono">
-                      Next eligible: {formatTimestamp(r.nextAllowedAt)}
+                      Next ready: {formatTimestamp(r.nextAllowedAt)}
                     </p>
                   )}
                 </div>
                 <span
                   className={`text-xs font-semibold shrink-0 ${
-                    r.eligible ? 'text-emerald-400' : 'text-amber-300'
+                    r.eligible ? 'text-emerald-700' : 'text-amber-700'
                   }`}
                 >
-                  {r.eligible ? 'Eligible' : 'Suppressed'}
+                  {r.eligible ? 'Ready' : 'Paused'}
                 </span>
               </div>
             ))}
         </div>
 
-        {/* HOST / ADMIN Rules & Dispatch */}
-        <div className="pt-4 border-t border-slate-800 grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="space-y-3">
-            <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
-              <SlidersHorizontal className="w-3.5 h-3.5 text-slate-400" />
-              <span>Group Quiet Hours &amp; Cooldown (HOST / ADMIN)</span>
-            </div>
+        {isHostOrAdmin && showReminderSettings && (
+          <div className="pt-3 border-t border-emerald-200/70 space-y-3">
             <div className="grid grid-cols-3 gap-2">
               <div>
-                <label className="block text-[11px] text-slate-400 mb-1">
-                  Quiet Start (0–23)
+                <label className="block text-[11px] font-medium text-slate-700 mb-1">
+                  Quiet Start
                 </label>
                 <input
                   type="number"
                   min={0}
                   max={23}
-                  disabled={!isHostOrAdmin || busy}
                   value={quietStart}
                   onChange={(e) => setQuietStart(Number(e.target.value))}
-                  className="w-full min-h-[40px] rounded-lg bg-slate-900 border border-slate-700 px-2.5 text-sm font-mono text-slate-100 disabled:opacity-50"
+                  className="w-full min-h-[44px] rounded-xl bg-white/90 border border-emerald-200 px-2.5 text-sm font-mono text-slate-900"
                 />
               </div>
               <div>
-                <label className="block text-[11px] text-slate-400 mb-1">
-                  Quiet End (0–23)
+                <label className="block text-[11px] font-medium text-slate-700 mb-1">
+                  Quiet End
                 </label>
                 <input
                   type="number"
                   min={0}
                   max={23}
-                  disabled={!isHostOrAdmin || busy}
                   value={quietEnd}
                   onChange={(e) => setQuietEnd(Number(e.target.value))}
-                  className="w-full min-h-[40px] rounded-lg bg-slate-900 border border-slate-700 px-2.5 text-sm font-mono text-slate-100 disabled:opacity-50"
+                  className="w-full min-h-[44px] rounded-xl bg-white/90 border border-emerald-200 px-2.5 text-sm font-mono text-slate-900"
                 />
               </div>
               <div>
-                <label className="block text-[11px] text-slate-400 mb-1">
-                  Cooldown (hrs)
+                <label className="block text-[11px] font-medium text-slate-700 mb-1">
+                  Cooldown (h)
                 </label>
                 <input
                   type="number"
                   min={1}
                   max={168}
-                  disabled={!isHostOrAdmin || busy}
                   value={cooldownHours}
                   onChange={(e) => setCooldownHours(Number(e.target.value))}
-                  className="w-full min-h-[40px] rounded-lg bg-slate-900 border border-slate-700 px-2.5 text-sm font-mono text-slate-100 disabled:opacity-50"
+                  className="w-full min-h-[44px] rounded-xl bg-white/90 border border-emerald-200 px-2.5 text-sm font-mono text-slate-900"
                 />
               </div>
             </div>
             <button
               type="button"
-              disabled={!isHostOrAdmin || busy}
+              disabled={busy}
               onClick={() =>
                 void onUpdateReminderSettings({
                   quietHoursStart: quietStart,
@@ -357,63 +343,35 @@ export const BalancesPlanScreen: React.FC<BalancesPlanScreenProps> = ({
                   reminderCooldownHours: cooldownHours,
                 })
               }
-              className="min-h-[40px] px-4 py-2 rounded-xl border border-slate-700 hover:border-slate-600 text-xs font-medium text-slate-200 disabled:opacity-50"
+              className="min-h-[44px] px-4 py-2 rounded-xl border border-emerald-200 bg-white text-xs font-semibold text-slate-800 hover:bg-emerald-50"
             >
               Save Reminder Rules
             </button>
           </div>
+        )}
 
-          <div className="space-y-3">
-            <div className="flex items-center gap-2 text-xs font-semibold text-slate-300">
-              <Clock className="w-3.5 h-3.5 text-slate-400" />
-              <span>Dispatch Batched Summary</span>
-            </div>
-            <div className="flex flex-col sm:flex-row gap-2">
-              <select
-                value={testHourInput}
-                onChange={(e) => setTestHourInput(e.target.value)}
-                disabled={!isHostOrAdmin || busy}
-                className="min-h-[44px] rounded-xl bg-slate-900 border border-slate-700 px-3 text-xs text-slate-200"
-              >
-                <option value="">Use Real Server Hour</option>
-                <option value="14">Simulate Daytime (14:00)</option>
-                <option value="23">Simulate Quiet Hours (23:00)</option>
-              </select>
-              <button
-                type="button"
-                disabled={!isHostOrAdmin || busy}
-                onClick={async () => {
-                  const res = await onSendReminders(
-                    testHourInput === '' ? undefined : Number(testHourInput),
-                  );
-                  setDispatchLog(res);
-                }}
-                className="min-h-[44px] px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center justify-center gap-2 disabled:opacity-50 whitespace-nowrap"
-              >
-                <Send className="w-3.5 h-3.5" />
-                <span>Send Batched Summary</span>
-              </button>
-            </div>
-            {!isHostOrAdmin && (
-              <p className="text-xs text-slate-500">
-                Switch perspective to HOST or ADMIN to dispatch or configure group reminders.
-              </p>
-            )}
-          </div>
-        </div>
+        {isHostOrAdmin && state.reminderStatuses.some((r) => r.owedMinor > 0) && (
+          <button
+            type="button"
+            disabled={busy}
+            onClick={async () => {
+              const res = await onSendReminders();
+              setDispatchLog(res);
+            }}
+            className="w-full sm:w-auto min-h-[46px] px-5 py-2.5 rounded-2xl bg-gradient-to-r from-violet-700 to-emerald-700 hover:from-violet-600 hover:to-emerald-600 text-white text-xs font-semibold flex items-center justify-center gap-2 disabled:opacity-50"
+          >
+            <Send className="w-3.5 h-3.5" />
+            <span>Send Summary Reminder</span>
+          </button>
+        )}
 
         {dispatchLog.length > 0 && (
-          <div className="rounded-xl bg-slate-900/80 border border-slate-800 p-3.5 space-y-2 text-xs">
-            <div className="font-semibold text-slate-200">Last Batch Dispatch Result</div>
+          <div className="rounded-2xl bg-[#F4F0FD] border border-violet-200 p-3.5 space-y-2 text-xs">
+            <div className="font-semibold text-slate-900">Reminder Summary</div>
             {dispatchLog.map((entry) => (
-              <div key={entry.memberId} className="flex flex-col gap-0.5 border-t border-slate-800/80 pt-2 first:border-t-0 first:pt-0">
-                <div className="flex items-center justify-between">
-                  <span className="font-medium text-slate-100">{entry.name}</span>
-                  <span className={entry.status === 'SENT' ? 'text-emerald-400 font-semibold' : 'text-amber-300 font-semibold'}>
-                    {entry.status}
-                  </span>
-                </div>
-                <div className="text-slate-400">{entry.summaryText ?? entry.reason}</div>
+              <div key={entry.memberId} className="flex items-center justify-between gap-2">
+                <span className="font-medium text-slate-800">{entry.name}</span>
+                <span className="text-slate-600">{entry.summaryText ?? entry.reason}</span>
               </div>
             ))}
           </div>

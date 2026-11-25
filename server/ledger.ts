@@ -87,15 +87,15 @@ export interface GroupBalanceSummary {
   simplifiedPlan: TransferEdge[];
 }
 
-export function parsePkrToPaisa(raw: string | number): number {
+export function parsePkrToMinor(raw: string | number): number {
   const cleaned = String(raw)
     .trim()
-    .replace(/^rs\.?\s*/i, '')
     .replace(/^pkr\s*/i, '')
+    .replace(/^rs\.?\s*/i, '')
     .replace(/,/g, '');
 
   if (!/^\d+(\.\d{1,2})?$/.test(cleaned)) {
-    throw new Error('Enter a valid positive PKR amount with up to 2 decimal places.');
+    throw new Error('Enter a valid positive PKR amount (e.g. 1250 or 1250.50).');
   }
 
   const [wholePart, fracPart = ''] = cleaned.split('.');
@@ -104,22 +104,25 @@ export function parsePkrToPaisa(raw: string | number): number {
   const totalMinor = whole * 100 + frac;
 
   if (!Number.isSafeInteger(totalMinor) || totalMinor <= 0) {
-    throw new Error('Amount must be greater than Rs. 0.00.');
+    throw new Error('Amount must be greater than PKR 0.');
   }
 
   return totalMinor;
 }
 
-export function formatPaisaToPkr(paisa: number): string {
-  if (!Number.isInteger(paisa)) {
-    throw new Error('Paisa value must be an integer.');
+export function formatMinorToPkr(minor: number): string {
+  if (!Number.isInteger(minor)) {
+    throw new Error('Currency value must be an integer.');
   }
-  const sign = paisa < 0 ? '-' : '';
-  const abs = Math.abs(paisa);
-  const rupees = Math.floor(abs / 100);
+  const sign = minor < 0 ? '-' : '';
+  const abs = Math.abs(minor);
+  const whole = Math.floor(abs / 100);
   const rem = abs % 100;
-  const formattedRupees = rupees.toLocaleString('en-US');
-  return `${sign}Rs. ${formattedRupees}.${String(rem).padStart(2, '0')}`;
+  const formattedWhole = whole.toLocaleString('en-US');
+  if (rem === 0) {
+    return `${sign}PKR ${formattedWhole}`;
+  }
+  return `${sign}PKR ${formattedWhole}.${String(rem).padStart(2, '0')}`;
 }
 
 export function computeEqualSplits(
@@ -127,11 +130,11 @@ export function computeEqualSplits(
   memberIds: number[],
 ): Array<{ memberId: number; amountMinor: number }> {
   if (!Number.isInteger(totalMinor) || totalMinor <= 0) {
-    throw new Error('Total minor units must be a positive integer.');
+    throw new Error('Total amount must be greater than PKR 0.');
   }
   const uniqueSorted = [...new Set(memberIds)].sort((a, b) => a - b);
   if (uniqueSorted.length === 0) {
-    throw new Error('At least one participant is required for a split.');
+    throw new Error('Select at least one person to split this bill.');
   }
 
   const count = uniqueSorted.length;
@@ -149,10 +152,10 @@ export function validateCustomSplits(
   splits: Array<{ memberId: number; amountMinor: number }>,
 ): Array<{ memberId: number; amountMinor: number }> {
   if (!Number.isInteger(totalMinor) || totalMinor <= 0) {
-    throw new Error('Total minor units must be a positive integer.');
+    throw new Error('Total amount must be greater than PKR 0.');
   }
   if (splits.length === 0) {
-    throw new Error('Custom splits require at least one participant.');
+    throw new Error('Assign amounts to at least one person.');
   }
 
   const seen = new Set<number>();
@@ -160,13 +163,13 @@ export function validateCustomSplits(
 
   for (const s of splits) {
     if (!Number.isInteger(s.memberId) || s.memberId <= 0) {
-      throw new Error('Invalid member in splits.');
+      throw new Error('Invalid member in split list.');
     }
     if (seen.has(s.memberId)) {
-      throw new Error('Duplicate member found in custom splits.');
+      throw new Error('Each person can only appear once in a split.');
     }
     if (!Number.isInteger(s.amountMinor) || s.amountMinor < 0) {
-      throw new Error('Each split must be a non-negative integer in paisa.');
+      throw new Error('Each share must be a valid PKR amount.');
     }
     seen.add(s.memberId);
     runningSum += s.amountMinor;
@@ -175,7 +178,7 @@ export function validateCustomSplits(
   if (runningSum !== totalMinor) {
     const diff = totalMinor - runningSum;
     throw new Error(
-      `Split sum (${formatPaisaToPkr(runningSum)}) must strictly equal total (${formatPaisaToPkr(totalMinor)}). Delta: ${formatPaisaToPkr(diff)}.`,
+      `Split total (${formatMinorToPkr(runningSum)}) must match ${formatMinorToPkr(totalMinor)}. Difference: ${formatMinorToPkr(diff)}.`,
     );
   }
 
@@ -214,7 +217,6 @@ export function computeGroupBalances(
     splitsByExpense.set(s.expenseId, arr);
   }
 
-  // Pairwise directed debt matrix: key `${from}->${to}` = minor units owed
   const pairDebt = new Map<string, number>();
   const addPairDebt = (fromId: number, toId: number, delta: number) => {
     if (fromId === toId || delta === 0) return;
@@ -274,11 +276,9 @@ export function computeGroupBalances(
       receiver.netMinor -= st.amountMinor;
     }
 
-    // Confirmed settlement reduces what fromMember owes toMember
     addPairDebt(st.fromMemberId, st.toMemberId, -st.amountMinor);
   }
 
-  // Collapse bidirectional pair debts into positive directed edges
   const rawPairBalances: TransferEdge[] = [];
   const memberIds = members.map((m) => m.memberId).sort((a, b) => a - b);
   for (let i = 0; i < memberIds.length; i += 1) {
@@ -313,7 +313,6 @@ export function computeGroupBalances(
     (a, b) => b.netMinor - a.netMinor,
   );
 
-  // Greedy minimum-transfer simplification
   const creditors = netBalances
     .filter((m) => m.netMinor > 0)
     .map((m) => ({ memberId: m.memberId, name: m.name, remaining: m.netMinor }))
@@ -385,7 +384,6 @@ export function isHourInQuietWindow(
   if (quietStart < quietEnd) {
     return hour >= quietStart && hour < quietEnd;
   }
-  // Overnight quiet window (e.g. 22:00 to 08:00)
   return hour >= quietStart || hour < quietEnd;
 }
 
@@ -423,7 +421,7 @@ export function evaluateReminderEligibility(
       inQuietHours: true,
       isSnoozed,
       inCooldown,
-      reason: `Suppressed during quiet hours (${String(quietStart).padStart(2, '0')}:00–${String(quietEnd).padStart(2, '0')}:00).`,
+      reason: `Paused during quiet hours (${String(quietStart).padStart(2, '0')}:00–${String(quietEnd).padStart(2, '0')}:00).`,
       nextAllowedAt: null,
     };
   }
@@ -434,7 +432,7 @@ export function evaluateReminderEligibility(
       inQuietHours: false,
       isSnoozed: true,
       inCooldown,
-      reason: 'Member snoozed reminders.',
+      reason: 'Snoozed by roommate.',
       nextAllowedAt: snoozeDate.toISOString(),
     };
   }
@@ -445,7 +443,7 @@ export function evaluateReminderEligibility(
       inQuietHours: false,
       isSnoozed: false,
       inCooldown: true,
-      reason: `Cooldown active (${cooldownHours}h non-spam window).`,
+      reason: `Wait ${cooldownHours}h between reminders.`,
       nextAllowedAt: cooldownUntil.toISOString(),
     };
   }
@@ -455,7 +453,7 @@ export function evaluateReminderEligibility(
     inQuietHours: false,
     isSnoozed: false,
     inCooldown: false,
-    reason: 'Eligible for batched summary reminder.',
+    reason: 'Ready for summary reminder.',
     nextAllowedAt: null,
   };
 }

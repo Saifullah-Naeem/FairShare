@@ -1,10 +1,11 @@
-import React, { useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { Check, FileUp, PlusCircle, Receipt } from 'lucide-react';
 import type { LedgerState } from '../../types/ledger';
 import {
   computeEqualSplitPreview,
   formatPkr,
-  parsePkrInputToPaisa,
+  formatPkrInput,
+  parsePkrInputToMinor,
 } from '../../utils/currency';
 
 interface AddExpenseScreenProps {
@@ -24,11 +25,11 @@ interface AddExpenseScreenProps {
 
 const CATEGORIES = [
   'Food',
-  'Utilities',
-  'Room Maintenance',
+  'Bills',
+  'Rent',
   'Groceries',
-  'Transport',
-  'General',
+  'Travel',
+  'Other',
 ];
 
 export const AddExpenseScreen: React.FC<AddExpenseScreenProps> = ({
@@ -36,13 +37,12 @@ export const AddExpenseScreen: React.FC<AddExpenseScreenProps> = ({
   onSubmitExpense,
   busy,
 }) => {
-  const defaultPayer =
-    state.currentMemberId ?? state.members[0]?.memberId ?? 1;
-
   const [title, setTitle] = useState('');
   const [category, setCategory] = useState('Food');
   const [amountPkr, setAmountPkr] = useState('');
-  const [paidByMemberId, setPaidByMemberId] = useState<number>(defaultPayer);
+  const [paidByMemberId, setPaidByMemberId] = useState<number>(
+    state.currentMemberId,
+  );
   const [splitMode, setSplitMode] = useState<'EQUAL' | 'CUSTOM'>('EQUAL');
   const [selectedIds, setSelectedIds] = useState<number[]>(() =>
     state.members.map((m) => m.memberId),
@@ -51,8 +51,14 @@ export const AddExpenseScreen: React.FC<AddExpenseScreenProps> = ({
   const [receiptFile, setReceiptFile] = useState<File | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
 
+  useEffect(() => {
+    setPaidByMemberId(state.currentMemberId);
+    setSelectedIds(state.members.map((m) => m.memberId));
+    setCustomValues({});
+  }, [state.group.id, state.currentMemberId, state.members]);
+
   const totalMinor = useMemo(() => {
-    const parsed = parsePkrInputToPaisa(amountPkr);
+    const parsed = parsePkrInputToMinor(amountPkr);
     return parsed && parsed > 0 ? parsed : 0;
   }, [amountPkr]);
 
@@ -68,7 +74,7 @@ export const AddExpenseScreen: React.FC<AddExpenseScreenProps> = ({
     for (const m of state.members) {
       const raw = (customValues[m.memberId] ?? '').trim();
       if (!raw) continue;
-      const parsed = parsePkrInputToPaisa(raw);
+      const parsed = parsePkrInputToMinor(raw);
       if (parsed === null) {
         invalidField = true;
       } else {
@@ -109,9 +115,7 @@ export const AddExpenseScreen: React.FC<AddExpenseScreenProps> = ({
     );
     const next: Record<number, string> = {};
     for (const [id, minor] of eq.entries()) {
-      const r = Math.floor(minor / 100);
-      const p = minor % 100;
-      next[id] = `${r}.${String(p).padStart(2, '0')}`;
+      next[id] = formatPkrInput(minor);
     }
     setCustomValues(next);
   };
@@ -121,21 +125,20 @@ export const AddExpenseScreen: React.FC<AddExpenseScreenProps> = ({
     setFormError(null);
 
     if (!title.trim()) {
-      setFormError('Enter an expense description.');
+      setFormError('Enter what this bill was for.');
       return;
     }
     if (totalMinor <= 0) {
-      setFormError('Enter a valid PKR amount greater than Rs. 0.00.');
+      setFormError('Enter a valid PKR amount greater than 0.');
       return;
     }
-
     if (splitMode === 'EQUAL' && !isEqualValid) {
-      setFormError('Select at least one participant for an equal split.');
+      setFormError('Choose at least one person to split equally.');
       return;
     }
     if (splitMode === 'CUSTOM' && !isCustomValid) {
       setFormError(
-        `Custom splits must strictly equal ${formatPkr(totalMinor)}. Remaining delta: ${formatPkr(customBreakdown.remaining)}.`,
+        `Custom shares must total ${formatPkr(totalMinor)}. Left to assign: ${formatPkr(customBreakdown.remaining)}.`,
       );
       return;
     }
@@ -156,78 +159,72 @@ export const AddExpenseScreen: React.FC<AddExpenseScreenProps> = ({
       setCustomValues({});
       setReceiptFile(null);
     } catch (err) {
-      setFormError(
-        err instanceof Error ? err.message : 'Unable to save expense.',
-      );
+      setFormError(err instanceof Error ? err.message : 'Unable to save bill.');
     }
   };
 
   return (
-    <form onSubmit={(e) => void handleSubmit(e)} className="space-y-6 max-w-3xl">
-      <section className="rounded-2xl bg-[#131C2E] border border-slate-800 p-5 sm:p-6 space-y-5">
+    <form onSubmit={(e) => void handleSubmit(e)} className="space-y-4 max-w-2xl">
+      {/* Bill Details (Mint Card) */}
+      <section className="rounded-3xl bg-[#EFFBF5]/95 border border-emerald-200/80 p-5 space-y-4 shadow-xs">
         <div>
-          <h2 className="font-display text-lg font-semibold text-slate-100">
-            Log Shared Expense
+          <h2 className="font-display text-lg font-bold text-slate-900">
+            Add a Bill
           </h2>
-          <p className="text-xs text-slate-400 mt-0.5">
-            Amounts are converted strictly to integer paisa (`1 Rs. = 100 paisa`). Active splits must equal total exactly.
+          <p className="text-xs text-slate-600 mt-0.5">
+            Enter the PKR total and choose who shares it.
           </p>
         </div>
 
         {formError && (
-          <div className="rounded-xl bg-rose-500/10 border border-rose-500/30 px-4 py-3 text-xs text-rose-300">
+          <div className="rounded-2xl bg-rose-100 border border-rose-300 px-4 py-3 text-xs font-semibold text-rose-800">
             {formError}
           </div>
         )}
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div className="sm:col-span-2">
-            <label
-              htmlFor="expense-title"
-              className="block text-xs font-medium text-slate-300 mb-1.5"
-            >
-              Description
-            </label>
-            <input
-              id="expense-title"
-              type="text"
-              required
-              maxLength={120}
-              placeholder="e.g. Monthly K-Electric / Gas Cylinder Refill"
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              className="w-full min-h-[44px] rounded-xl bg-slate-900 border border-slate-700/80 px-3.5 text-sm text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-emerald-500"
-            />
-          </div>
+        <div>
+          <label
+            htmlFor="expense-title"
+            className="block text-xs font-semibold text-slate-700 mb-1.5"
+          >
+            What was it for?
+          </label>
+          <input
+            id="expense-title"
+            type="text"
+            required
+            maxLength={120}
+            placeholder="e.g. Dinner Biryani, Wi-Fi Bill, Groceries"
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            className="w-full min-h-[46px] rounded-2xl bg-white/85 border border-emerald-200 px-3.5 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-emerald-600 focus:bg-white"
+          />
+        </div>
 
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
           <div>
             <label
               htmlFor="expense-amount"
-              className="block text-xs font-medium text-slate-300 mb-1.5"
+              className="block text-xs font-semibold text-slate-700 mb-1.5"
             >
-              Total Amount (PKR Rs.)
+              Amount (PKR)
             </label>
             <input
               id="expense-amount"
               type="text"
               inputMode="decimal"
               required
-              placeholder="e.g. 1250.50"
+              placeholder="e.g. 2500"
               value={amountPkr}
               onChange={(e) => setAmountPkr(e.target.value)}
-              className="w-full min-h-[44px] rounded-xl bg-slate-900 border border-slate-700/80 px-3.5 text-sm font-mono text-slate-100 placeholder:text-slate-500 focus:outline-none focus:border-emerald-500"
+              className="w-full min-h-[46px] rounded-2xl bg-white/85 border border-emerald-200 px-3.5 text-base font-mono tabular-nums font-semibold text-slate-900 placeholder:text-slate-400 focus:outline-none focus:border-emerald-600 focus:bg-white"
             />
-            {totalMinor > 0 && (
-              <p className="mt-1 text-[11px] font-mono text-emerald-400">
-                Exact minor units: {totalMinor.toLocaleString()} paisa
-              </p>
-            )}
           </div>
 
           <div>
             <label
               htmlFor="expense-payer"
-              className="block text-xs font-medium text-slate-300 mb-1.5"
+              className="block text-xs font-semibold text-slate-700 mb-1.5"
             >
               Paid By
             </label>
@@ -235,101 +232,98 @@ export const AddExpenseScreen: React.FC<AddExpenseScreenProps> = ({
               id="expense-payer"
               value={paidByMemberId}
               onChange={(e) => setPaidByMemberId(Number(e.target.value))}
-              className="w-full min-h-[44px] rounded-xl bg-slate-900 border border-slate-700/80 px-3.5 text-sm text-slate-100 focus:outline-none focus:border-emerald-500"
+              className="w-full min-h-[46px] rounded-2xl bg-white/85 border border-emerald-200 px-3.5 text-sm text-slate-900 focus:outline-none focus:border-emerald-600 focus:bg-white"
             >
               {state.members.map((m) => (
                 <option key={m.memberId} value={m.memberId}>
-                  {m.name} {m.isShadow ? '(Shadow)' : `(${m.role})`}
+                  {m.name} {m.memberId === state.currentMemberId ? '(You)' : ''}
                 </option>
               ))}
             </select>
           </div>
+        </div>
 
-          <div>
-            <label
-              htmlFor="expense-category"
-              className="block text-xs font-medium text-slate-300 mb-1.5"
-            >
-              Category
-            </label>
-            <select
-              id="expense-category"
-              value={category}
-              onChange={(e) => setCategory(e.target.value)}
-              className="w-full min-h-[44px] rounded-xl bg-slate-900 border border-slate-700/80 px-3.5 text-sm text-slate-100 focus:outline-none focus:border-emerald-500"
-            >
-              {CATEGORIES.map((c) => (
-                <option key={c} value={c}>
-                  {c}
-                </option>
-              ))}
-            </select>
+        {/* 1-Tap Category Chips */}
+        <div>
+          <span className="block text-xs font-semibold text-slate-700 mb-1.5">
+            Category
+          </span>
+          <div className="flex flex-wrap gap-2">
+            {CATEGORIES.map((c) => (
+              <button
+                key={c}
+                type="button"
+                onClick={() => setCategory(c)}
+                className={`min-h-[40px] px-3.5 py-1.5 rounded-xl text-xs font-semibold transition-colors border ${
+                  category === c
+                    ? 'bg-gradient-to-r from-violet-700 to-emerald-700 text-white border-transparent shadow-xs'
+                    : 'bg-white/80 text-slate-700 border-emerald-200 hover:border-violet-400'
+                }`}
+              >
+                {c}
+              </button>
+            ))}
           </div>
+        </div>
 
-          <div>
-            <label
-              htmlFor="expense-receipt"
-              className="block text-xs font-medium text-slate-300 mb-1.5"
-            >
-              Optional Receipt Proof (JPG, PNG, PDF)
-            </label>
-            <label
-              htmlFor="expense-receipt"
-              className="min-h-[44px] w-full rounded-xl bg-slate-900 border border-dashed border-slate-700 hover:border-emerald-500/60 px-3.5 flex items-center justify-between gap-2 text-xs text-slate-300 cursor-pointer"
-            >
-              <span className="flex items-center gap-2 truncate">
-                <FileUp className="w-4 h-4 text-emerald-400 shrink-0" />
-                <span className="truncate">
-                  {receiptFile ? receiptFile.name : 'Attach local receipt image/PDF'}
-                </span>
+        {/* Receipt Attachment */}
+        <div>
+          <label
+            htmlFor="expense-receipt"
+            className="min-h-[44px] w-full rounded-2xl bg-white/75 border border-dashed border-emerald-400 hover:border-emerald-600 px-3.5 flex items-center justify-between gap-2 text-xs font-medium text-slate-700 cursor-pointer"
+          >
+            <span className="flex items-center gap-2 truncate">
+              <FileUp className="w-4 h-4 text-emerald-700 shrink-0" />
+              <span className="truncate">
+                {receiptFile ? receiptFile.name : 'Attach receipt photo or PDF (optional)'}
               </span>
-              {receiptFile && <Receipt className="w-4 h-4 text-emerald-400 shrink-0" />}
-            </label>
-            <input
-              id="expense-receipt"
-              type="file"
-              accept=".jpg,.jpeg,.png,.webp,.pdf"
-              onChange={(e) => setReceiptFile(e.target.files?.[0] ?? null)}
-              className="sr-only"
-            />
-          </div>
+            </span>
+            {receiptFile && <Receipt className="w-4 h-4 text-emerald-700 shrink-0" />}
+          </label>
+          <input
+            id="expense-receipt"
+            type="file"
+            accept=".jpg,.jpeg,.png,.webp,.pdf"
+            onChange={(e) => setReceiptFile(e.target.files?.[0] ?? null)}
+            className="sr-only"
+          />
         </div>
       </section>
 
-      {/* Split Distribution Section */}
-      <section className="rounded-2xl bg-[#131C2E] border border-slate-800 p-5 sm:p-6 space-y-4">
+      {/* Split Method Card (Lilac Card) */}
+      <section className="rounded-3xl bg-[#F4F0FD]/95 border border-violet-200/80 p-5 space-y-4 shadow-xs">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div>
-            <h3 className="font-display text-base font-semibold text-slate-100">
-              Split Method
+            <h3 className="font-display text-base font-bold text-slate-900">
+              How to Split
             </h3>
-            <p className="text-xs text-slate-400">
-              Equal splits allocate odd remainder paisa deterministically (+Rs. 0.01) so zero paisa are ever lost.
+            <p className="text-xs text-slate-600">
+              Split equally or type exact PKR shares per person.
             </p>
           </div>
 
-          <div className="inline-flex items-center p-1 rounded-xl bg-slate-900 border border-slate-800 self-start">
+          <div className="inline-flex items-center p-1 rounded-2xl bg-white/80 border border-violet-200 self-start">
             <button
               type="button"
               onClick={() => setSplitMode('EQUAL')}
-              className={`min-h-[38px] px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${
+              className={`min-h-[40px] px-3.5 py-1.5 rounded-xl text-xs font-semibold transition-colors whitespace-nowrap ${
                 splitMode === 'EQUAL'
-                  ? 'bg-emerald-600 text-white'
-                  : 'text-slate-400 hover:text-slate-100'
+                  ? 'bg-emerald-700 text-white'
+                  : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              Equal Split
+              Split Equally
             </button>
             <button
               type="button"
               onClick={() => setSplitMode('CUSTOM')}
-              className={`min-h-[38px] px-3.5 py-1.5 rounded-lg text-xs font-medium transition-colors whitespace-nowrap ${
+              className={`min-h-[40px] px-3.5 py-1.5 rounded-xl text-xs font-semibold transition-colors whitespace-nowrap ${
                 splitMode === 'CUSTOM'
-                  ? 'bg-emerald-600 text-white'
-                  : 'text-slate-400 hover:text-slate-100'
+                  ? 'bg-violet-700 text-white'
+                  : 'text-slate-600 hover:text-slate-900'
               }`}
             >
-              Custom Split
+              Custom Amounts
             </button>
           </div>
         </div>
@@ -344,31 +338,31 @@ export const AddExpenseScreen: React.FC<AddExpenseScreenProps> = ({
                   key={m.memberId}
                   type="button"
                   onClick={() => toggleParticipant(m.memberId)}
-                  className={`w-full min-h-[48px] px-4 py-2.5 rounded-xl border flex items-center justify-between gap-3 text-left transition-colors ${
+                  className={`w-full min-h-[50px] px-4 py-2.5 rounded-2xl border flex items-center justify-between gap-3 text-left transition-colors ${
                     checked
-                      ? 'bg-emerald-500/10 border-emerald-500/40 text-slate-100'
-                      : 'bg-slate-900/60 border-slate-800 text-slate-400 hover:border-slate-700'
+                      ? 'bg-[#EFFBF5] border-emerald-400 text-slate-900'
+                      : 'bg-white/75 border-violet-200 text-slate-500'
                   }`}
                 >
                   <div className="flex items-center gap-3 min-w-0">
                     <span
                       className={`w-5 h-5 rounded-md border flex items-center justify-center shrink-0 ${
                         checked
-                          ? 'bg-emerald-600 border-emerald-500 text-white'
-                          : 'border-slate-600 bg-slate-900'
+                          ? 'bg-emerald-700 border-emerald-700 text-white'
+                          : 'border-slate-300 bg-white'
                       }`}
                     >
                       {checked && <Check className="w-3.5 h-3.5" />}
                     </span>
                     <div className="min-w-0">
-                      <div className="text-sm font-medium truncate">{m.name}</div>
-                      <div className="text-xs text-slate-400">
-                        {m.isShadow ? 'Shadow Member' : m.role}
+                      <div className="text-sm font-semibold truncate">{m.name}</div>
+                      <div className="text-xs text-slate-600">
+                        {m.isShadow ? 'Invited friend' : `@${m.handle}`}
                       </div>
                     </div>
                   </div>
-                  <div className="font-mono text-sm font-semibold shrink-0">
-                    {checked && totalMinor > 0 ? formatPkr(share) : 'Rs. 0.00'}
+                  <div className="font-mono tabular-nums text-sm font-bold shrink-0">
+                    {checked && totalMinor > 0 ? formatPkr(share) : 'PKR 0'}
                   </div>
                 </button>
               );
@@ -378,21 +372,21 @@ export const AddExpenseScreen: React.FC<AddExpenseScreenProps> = ({
           <div className="space-y-3">
             <div className="flex items-center justify-between gap-2 text-xs">
               <span
-                className={`font-mono font-semibold ${
+                className={`font-mono tabular-nums font-bold ${
                   customBreakdown.remaining === 0 && totalMinor > 0
-                    ? 'text-emerald-400'
-                    : 'text-amber-300'
+                    ? 'text-emerald-700'
+                    : 'text-amber-700'
                 }`}
               >
-                Remaining to allocate: {formatPkr(customBreakdown.remaining)}
+                Left to assign: {formatPkr(customBreakdown.remaining)}
               </span>
               <button
                 type="button"
                 disabled={totalMinor <= 0}
                 onClick={handleEqualFillCustom}
-                className="text-emerald-400 hover:text-emerald-300 font-medium disabled:opacity-40"
+                className="min-h-[36px] text-violet-700 hover:text-violet-600 font-semibold disabled:opacity-40"
               >
-                Pre-fill Equal Shares
+                Fill Equal Amounts
               </button>
             </div>
 
@@ -400,21 +394,21 @@ export const AddExpenseScreen: React.FC<AddExpenseScreenProps> = ({
               {state.members.map((m) => (
                 <div
                   key={m.memberId}
-                  className="rounded-xl bg-slate-900/70 border border-slate-800 px-4 py-2.5 flex items-center justify-between gap-3"
+                  className="rounded-2xl bg-white/80 border border-violet-200 px-4 py-2.5 flex items-center justify-between gap-3"
                 >
                   <div className="min-w-0">
-                    <div className="text-sm font-medium text-slate-100 truncate">
+                    <div className="text-sm font-semibold text-slate-900 truncate">
                       {m.name}
                     </div>
-                    <div className="text-xs text-slate-400">
-                      {m.isShadow ? 'Shadow Member' : m.role}
+                    <div className="text-xs text-slate-600">
+                      {m.isShadow ? 'Invited friend' : `@${m.handle}`}
                     </div>
                   </div>
                   <div className="w-36 shrink-0">
                     <input
                       type="text"
                       inputMode="decimal"
-                      placeholder="0.00"
+                      placeholder="0"
                       value={customValues[m.memberId] ?? ''}
                       onChange={(e) =>
                         setCustomValues((prev) => ({
@@ -422,7 +416,7 @@ export const AddExpenseScreen: React.FC<AddExpenseScreenProps> = ({
                           [m.memberId]: e.target.value,
                         }))
                       }
-                      className="w-full min-h-[40px] rounded-lg bg-slate-950 border border-slate-700 px-3 text-right font-mono text-sm text-slate-100 focus:outline-none focus:border-emerald-500"
+                      className="w-full min-h-[44px] rounded-xl bg-white border border-violet-200 px-3 text-right font-mono tabular-nums text-sm font-semibold text-slate-900 focus:outline-none focus:border-violet-600"
                     />
                   </div>
                 </div>
@@ -431,19 +425,16 @@ export const AddExpenseScreen: React.FC<AddExpenseScreenProps> = ({
           </div>
         )}
 
-        <div className="pt-2 flex items-center justify-end">
-          <button
-            type="submit"
-            disabled={
-              busy ||
-              (splitMode === 'EQUAL' ? !isEqualValid : !isCustomValid)
-            }
-            className="w-full sm:w-auto min-h-[48px] px-6 py-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold transition-colors flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed"
-          >
-            <PlusCircle className="w-4 h-4" />
-            <span>{busy ? 'Saving Expense...' : 'Save Expense to Ledger'}</span>
-          </button>
-        </div>
+        <button
+          type="submit"
+          disabled={
+            busy || (splitMode === 'EQUAL' ? !isEqualValid : !isCustomValid)
+          }
+          className="w-full min-h-[48px] px-6 py-3 rounded-2xl bg-gradient-to-r from-emerald-700 to-violet-700 hover:from-emerald-600 hover:to-violet-600 text-white text-sm font-semibold transition-colors flex items-center justify-center gap-2 disabled:opacity-40 shadow-sm"
+        >
+          <PlusCircle className="w-4 h-4" />
+          <span>{busy ? 'Saving...' : 'Save Bill'}</span>
+        </button>
       </section>
     </form>
   );

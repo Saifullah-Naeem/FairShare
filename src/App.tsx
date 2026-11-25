@@ -1,21 +1,26 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useState } from 'react';
 import {
+  addMemberByHandle,
   cancelSettlement,
-  claimShadowMember,
+  claimInviteCode,
   confirmSettlement,
   createExpense,
+  createGroup,
   createSettlement,
-  fetchLedgerState,
-  inviteShadowMember,
-  loginWithHandle,
+  fetchGroupState,
+  inviteUnregisteredFriend,
+  loginAccount,
+  registerAccount,
+  reissueFriendInvite,
   rejectSettlement,
-  resetDemoDatabase,
   sendBatchedReminders,
+  setMemoryAuthToken,
   snoozeMyReminders,
-  switchDemoPerspective,
+  updateGroupAppearance,
   updateReminderSettings,
   voidExpense,
 } from './api/client';
+import { AuthGate, FirstGroupGate } from './components/AuthGate';
 import { LayoutShell } from './components/LayoutShell';
 import { AddExpenseScreen } from './components/screens/AddExpenseScreen';
 import { BalancesPlanScreen } from './components/screens/BalancesPlanScreen';
@@ -23,158 +28,213 @@ import { HistoryAuditScreen } from './components/screens/HistoryAuditScreen';
 import { OverviewScreen } from './components/screens/OverviewScreen';
 import { SettlementsQueueScreen } from './components/screens/SettlementsQueueScreen';
 import { ShadowInviteScreen } from './components/screens/ShadowInviteScreen';
-import type { LedgerState, ScreenId, TransferEdge } from './types/ledger';
+import type {
+  GroupSummary,
+  LedgerState,
+  ScreenId,
+  TransferEdge,
+  UserProfile,
+} from './types/ledger';
 
 export default function App() {
+  const [user, setUser] = useState<UserProfile | null>(null);
+  const [groups, setGroups] = useState<GroupSummary[]>([]);
+  const [activeGroupId, setActiveGroupId] = useState<number | null>(null);
   const [state, setState] = useState<LedgerState | null>(null);
   const [activeScreen, setActiveScreen] = useState<ScreenId>('overview');
-  const [loading, setLoading] = useState(true);
+  const [selectedCategoryFilter, setSelectedCategoryFilter] =
+    useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const [loadError, setLoadError] = useState<string | null>(null);
   const [toast, setToast] = useState<{
     kind: 'success' | 'error';
     message: string;
   } | null>(null);
   const [prefilledSettleEdge, setPrefilledSettleEdge] =
     useState<TransferEdge | null>(null);
-  const [prefilledClaimToken, setPrefilledClaimToken] = useState<string>('');
 
   const showToast = useCallback(
     (kind: 'success' | 'error', message: string) => {
       setToast({ kind, message });
       window.setTimeout(() => {
         setToast((prev) => (prev?.message === message ? null : prev));
-      }, 4000);
+      }, 3600);
     },
     [],
   );
 
-  const loadInitialState = useCallback(async () => {
-    setLoading(true);
-    setLoadError(null);
-    try {
-      let data = await fetchLedgerState();
-      if (!data.currentMemberId) {
-        const defaultHost =
-          data.members.find((m) => m.role === 'HOST' && !m.isShadow) ??
-          data.members.find((m) => !m.isShadow);
-        if (defaultHost) {
-          await switchDemoPerspective(defaultHost.memberId);
-          data = await fetchLedgerState();
-        }
-      }
-      setState(data);
-    } catch (err) {
-      setLoadError(
-        err instanceof Error ? err.message : 'Unable to load FairShare Ledger.',
-      );
-    } finally {
-      setLoading(false);
-    }
+  const openGroup = useCallback(async (groupId: number) => {
+    const groupState = await fetchGroupState(groupId);
+    setActiveGroupId(groupId);
+    setGroups(groupState.groups);
+    setState(groupState);
   }, []);
 
-  useEffect(() => {
-    void loadInitialState();
-  }, [loadInitialState]);
-
-  const handleSwitchMember = async (memberId: number) => {
-    setBusy(true);
-    try {
-      const res = await switchDemoPerspective(memberId);
-      const updated = await fetchLedgerState();
-      setState(updated);
-      showToast('success', `Switched perspective to ${res.member.name} (${res.member.role}).`);
-    } catch (err) {
-      showToast(
-        'error',
-        err instanceof Error ? err.message : 'Failed to switch member.',
-      );
-    } finally {
-      setBusy(false);
-    }
+  const handleSignOut = () => {
+    setMemoryAuthToken(null);
+    setUser(null);
+    setGroups([]);
+    setActiveGroupId(null);
+    setState(null);
+    setActiveScreen('overview');
+    setPrefilledSettleEdge(null);
+    setSelectedCategoryFilter(null);
   };
 
-  const handleResetDemo = async () => {
-    setBusy(true);
-    try {
-      const res = await resetDemoDatabase();
-      setState(res.state);
-      setPrefilledClaimToken('');
-      setPrefilledSettleEdge(null);
-      showToast('success', 'Demo ledger wiped and re-seeded with fresh PKR data.');
-    } catch (err) {
-      showToast(
-        'error',
-        err instanceof Error ? err.message : 'Demo reset failed.',
-      );
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  if (loading && !state) {
+  if (!user) {
     return (
-      <div className="min-h-screen bg-[#090D16] text-slate-200 p-6 max-w-5xl mx-auto space-y-5">
-        <div className="h-10 w-56 rounded-xl bg-slate-800/80" />
-        <div className="h-44 rounded-2xl bg-slate-900 border border-slate-800" />
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
-          <div className="h-64 rounded-2xl bg-slate-900 border border-slate-800" />
-          <div className="h-64 rounded-2xl bg-slate-900 border border-slate-800" />
-        </div>
-      </div>
+      <AuthGate
+        busy={busy}
+        onRegister={async (params) => {
+          setBusy(true);
+          try {
+            const res = await registerAccount(params);
+            setUser(res.user);
+            setGroups(res.groups);
+            if (res.activeGroupId) {
+              await openGroup(res.activeGroupId);
+            }
+            showToast('success', `Welcome to FairShare, ${res.user.name}!`);
+          } finally {
+            setBusy(false);
+          }
+        }}
+        onLogin={async (handle, password) => {
+          setBusy(true);
+          try {
+            const res = await loginAccount(handle, password);
+            setUser(res.user);
+            setGroups(res.groups);
+            if (res.activeGroupId) {
+              await openGroup(res.activeGroupId);
+            }
+            showToast('success', `Signed in as ${res.user.name}.`);
+          } finally {
+            setBusy(false);
+          }
+        }}
+        onClaimInvite={async (params) => {
+          setBusy(true);
+          try {
+            const res = await claimInviteCode(params);
+            setUser(res.user);
+            setGroups(res.groups);
+            setActiveGroupId(res.activeGroupId);
+            setState(res.state);
+            showToast('success', `Welcome ${res.user.name}! You joined the group.`);
+          } finally {
+            setBusy(false);
+          }
+        }}
+      />
     );
   }
 
-  if (loadError || !state) {
+  if (!activeGroupId || !state) {
     return (
-      <div className="min-h-screen bg-[#090D16] text-slate-100 flex items-center justify-center p-6">
-        <div className="max-w-md w-full rounded-2xl bg-[#131C2E] border border-slate-800 p-6 space-y-4 text-center">
-          <h1 className="font-display text-xl font-bold">
-            Unable to Connect to FairShare Ledger
-          </h1>
-          <p className="text-sm text-slate-400">
-            {loadError ?? 'The SQLite backend did not respond.'}
-          </p>
-          <button
-            type="button"
-            onClick={() => void loadInitialState()}
-            className="min-h-[44px] px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-sm font-semibold"
-          >
-            Retry Connection
-          </button>
-        </div>
-      </div>
+      <FirstGroupGate
+        userName={user.name}
+        busy={busy}
+        onSignOut={handleSignOut}
+        onCreateGroup={async ({ name, iconKey, accentTheme }) => {
+          setBusy(true);
+          try {
+            const res = await createGroup({ name, iconKey, accentTheme });
+            setActiveGroupId(res.groupId);
+            setGroups(res.state.groups);
+            setState(res.state);
+            setActiveScreen('overview');
+            showToast('success', `Group "${name}" created!`);
+          } finally {
+            setBusy(false);
+          }
+        }}
+      />
     );
   }
 
-  const currentMember =
-    state.members.find((m) => m.memberId === state.currentMemberId) ?? null;
   const pendingCount = state.settlements.filter(
     (s) => s.status === 'PENDING_CONFIRMATION',
   ).length;
 
+  const currentMember = state.members.find(
+    (m) => m.memberId === state.currentMemberId,
+  );
+  const canCustomizeGroup =
+    currentMember?.role === 'HOST' || currentMember?.role === 'ADMIN';
+
   return (
     <LayoutShell
       activeScreen={activeScreen}
-      onNavigate={setActiveScreen}
-      groupName={state.group.name}
-      members={state.members}
-      currentMember={currentMember}
+      onNavigate={(screen) => {
+        if (screen !== 'history') {
+          setSelectedCategoryFilter(null);
+        }
+        setActiveScreen(screen);
+      }}
+      user={user}
+      groups={state.groups}
+      activeGroupId={activeGroupId}
+      canCustomizeGroup={canCustomizeGroup}
       pendingCount={pendingCount}
-      devTokens={state.devTokens}
-      verificationMode={state.verificationMode}
-      onSwitchMember={handleSwitchMember}
-      onResetDemo={handleResetDemo}
-      onPrefillClaimToken={(tok) => setPrefilledClaimToken(tok)}
       busy={busy}
+      onSignOut={handleSignOut}
+      onSelectGroup={async (groupId) => {
+        if (groupId === activeGroupId) return;
+        setBusy(true);
+        try {
+          await openGroup(groupId);
+          setPrefilledSettleEdge(null);
+          setSelectedCategoryFilter(null);
+        } catch (err) {
+          showToast(
+            'error',
+            err instanceof Error ? err.message : 'Unable to switch group.',
+          );
+        } finally {
+          setBusy(false);
+        }
+      }}
+      onCreateGroup={async ({ name, iconKey, accentTheme }) => {
+        setBusy(true);
+        try {
+          const res = await createGroup({ name, iconKey, accentTheme });
+          setActiveGroupId(res.groupId);
+          setGroups(res.state.groups);
+          setState(res.state);
+          setSelectedCategoryFilter(null);
+          setActiveScreen('overview');
+          showToast('success', `Switched to "${name}".`);
+        } finally {
+          setBusy(false);
+        }
+      }}
+      onUpdateGroupStyle={async ({ iconKey, accentTheme }) => {
+        setBusy(true);
+        try {
+          const res = await updateGroupAppearance(activeGroupId, {
+            iconKey,
+            accentTheme,
+          });
+          setState(res.state);
+          setGroups(res.state.groups);
+          showToast('success', 'Group badge updated.');
+        } catch (err) {
+          showToast(
+            'error',
+            err instanceof Error ? err.message : 'Unable to update badge.',
+          );
+        } finally {
+          setBusy(false);
+        }
+      }}
     >
       {toast && (
         <div
           role="status"
-          className={`fixed top-16 right-4 z-50 max-w-sm rounded-xl border px-4 py-3 text-xs font-medium shadow-xl backdrop-blur-md transition-opacity ${
+          className={`fixed top-16 right-4 z-50 max-w-sm rounded-2xl border px-4 py-3 text-xs font-semibold shadow-lg backdrop-blur-md ${
             toast.kind === 'success'
-              ? 'bg-emerald-950/90 border-emerald-500/40 text-emerald-200'
-              : 'bg-rose-950/90 border-rose-500/40 text-rose-200'
+              ? 'bg-[#EFFBF5]/95 border-emerald-300 text-emerald-900'
+              : 'bg-rose-100/95 border-rose-300 text-rose-900'
           }`}
         >
           {toast.message}
@@ -185,9 +245,10 @@ export default function App() {
         <OverviewScreen
           state={state}
           onNavigate={setActiveScreen}
-          onSwitchMember={handleSwitchMember}
-          onResetDemo={handleResetDemo}
-          busy={busy}
+          onSelectCategory={(category) => {
+            setSelectedCategoryFilter(category);
+            setActiveScreen('history');
+          }}
         />
       )}
 
@@ -202,9 +263,9 @@ export default function App() {
           onUpdateReminderSettings={async (params) => {
             setBusy(true);
             try {
-              const res = await updateReminderSettings(params);
+              const res = await updateReminderSettings(activeGroupId, params);
               setState(res.state);
-              showToast('success', 'Quiet hours and cooldown updated.');
+              showToast('success', 'Reminder rules updated.');
             } catch (err) {
               showToast(
                 'error',
@@ -217,41 +278,35 @@ export default function App() {
           onSnooze={async (hours) => {
             setBusy(true);
             try {
-              const res = await snoozeMyReminders(hours);
+              const res = await snoozeMyReminders(activeGroupId, hours);
               setState(res.state);
               showToast(
                 'success',
                 hours === 0
-                  ? 'Reminder snooze cleared.'
-                  : `Your reminders are snoozed for ${hours} hours.`,
+                  ? 'Reminders resumed.'
+                  : `Reminders snoozed for ${hours} hours.`,
               );
             } catch (err) {
               showToast(
                 'error',
-                err instanceof Error ? err.message : 'Failed to snooze.',
+                err instanceof Error ? err.message : 'Unable to snooze.',
               );
             } finally {
               setBusy(false);
             }
           }}
-          onSendReminders={async (testHour) => {
+          onSendReminders={async () => {
             setBusy(true);
             try {
-              const res = await sendBatchedReminders(testHour);
+              const res = await sendBatchedReminders(activeGroupId);
               setState(res.state);
               const sent = res.results.filter((r) => r.status === 'SENT').length;
-              const suppressed = res.results.filter(
-                (r) => r.status === 'SUPPRESSED',
-              ).length;
-              showToast(
-                'success',
-                `Batch processed: ${sent} sent, ${suppressed} suppressed by non-spam rules.`,
-              );
+              showToast('success', `Sent ${sent} summary reminder(s).`);
               return res.results;
             } catch (err) {
               showToast(
                 'error',
-                err instanceof Error ? err.message : 'Reminder dispatch failed.',
+                err instanceof Error ? err.message : 'Unable to send reminders.',
               );
               return [];
             } finally {
@@ -268,9 +323,9 @@ export default function App() {
           onSubmitExpense={async (params) => {
             setBusy(true);
             try {
-              const res = await createExpense(params);
+              const res = await createExpense(activeGroupId, params);
               setState(res.state);
-              showToast('success', 'Expense recorded with exact paisa splits.');
+              showToast('success', 'Bill added!');
               setActiveScreen('overview');
             } finally {
               setBusy(false);
@@ -288,12 +343,9 @@ export default function App() {
           onCreateSettlement={async (params) => {
             setBusy(true);
             try {
-              const res = await createSettlement(params);
+              const res = await createSettlement(activeGroupId, params);
               setState(res.state);
-              showToast(
-                'success',
-                'Settlement submitted as PENDING_CONFIRMATION.',
-              );
+              showToast('success', 'Payment recorded! Waiting for confirmation.');
             } finally {
               setBusy(false);
             }
@@ -301,13 +353,13 @@ export default function App() {
           onConfirmSettlement={async (id) => {
             setBusy(true);
             try {
-              const res = await confirmSettlement(id);
+              const res = await confirmSettlement(activeGroupId, id);
               setState(res.state);
-              showToast('success', 'Settlement confirmed and balances updated.');
+              showToast('success', 'Payment confirmed.');
             } catch (err) {
               showToast(
                 'error',
-                err instanceof Error ? err.message : 'Confirm failed.',
+                err instanceof Error ? err.message : 'Unable to confirm.',
               );
             } finally {
               setBusy(false);
@@ -316,13 +368,13 @@ export default function App() {
           onRejectSettlement={async (id, reason) => {
             setBusy(true);
             try {
-              const res = await rejectSettlement(id, reason);
+              const res = await rejectSettlement(activeGroupId, id, reason);
               setState(res.state);
-              showToast('success', 'Settlement rejected with reason recorded.');
+              showToast('success', 'Payment declined.');
             } catch (err) {
               showToast(
                 'error',
-                err instanceof Error ? err.message : 'Reject failed.',
+                err instanceof Error ? err.message : 'Unable to decline.',
               );
             } finally {
               setBusy(false);
@@ -331,13 +383,13 @@ export default function App() {
           onCancelSettlement={async (id) => {
             setBusy(true);
             try {
-              const res = await cancelSettlement(id);
+              const res = await cancelSettlement(activeGroupId, id);
               setState(res.state);
-              showToast('success', 'Pending settlement cancelled.');
+              showToast('success', 'Payment cancelled.');
             } catch (err) {
               showToast(
                 'error',
-                err instanceof Error ? err.message : 'Cancel failed.',
+                err instanceof Error ? err.message : 'Unable to cancel.',
               );
             } finally {
               setBusy(false);
@@ -349,40 +401,35 @@ export default function App() {
       {activeScreen === 'shadow' && (
         <ShadowInviteScreen
           state={state}
-          prefilledToken={prefilledClaimToken}
           busy={busy}
-          onInviteShadow={async (name) => {
+          onAddByHandle={async (handle) => {
             setBusy(true);
             try {
-              const res = await inviteShadowMember(name);
+              const res = await addMemberByHandle(activeGroupId, handle);
               setState(res.state);
-              showToast('success', `Added shadow member ${name}.`);
-              return { claimToken: res.claimToken };
+              showToast('success', 'Roommate added to group.');
             } finally {
               setBusy(false);
             }
           }}
-          onClaimShadow={async (params) => {
+          onInviteUnregistered={async (name) => {
             setBusy(true);
             try {
-              const res = await claimShadowMember(params);
+              const res = await inviteUnregisteredFriend(activeGroupId, name);
               setState(res.state);
-              setPrefilledClaimToken('');
-              showToast(
-                'success',
-                `Welcome ${res.claimedMember.name}! Account claimed & locked.`,
-              );
+              showToast('success', `Invite code created for ${name}.`);
+              return { inviteCode: res.inviteCode };
             } finally {
               setBusy(false);
             }
           }}
-          onLogin={async (handle, password) => {
+          onReissueInvite={async (memberId) => {
             setBusy(true);
             try {
-              const res = await loginWithHandle(handle, password);
-              const updated = await fetchLedgerState();
-              setState(updated);
-              showToast('success', `Signed in as ${res.member.name}.`);
+              const res = await reissueFriendInvite(activeGroupId, memberId);
+              setState(res.state);
+              showToast('success', 'New invite code ready to copy.');
+              return { inviteCode: res.inviteCode };
             } finally {
               setBusy(false);
             }
@@ -393,16 +440,15 @@ export default function App() {
       {activeScreen === 'history' && (
         <HistoryAuditScreen
           state={state}
+          categoryFilter={selectedCategoryFilter}
+          onClearCategoryFilter={() => setSelectedCategoryFilter(null)}
           busy={busy}
           onVoidExpense={async (expenseId, reason) => {
             setBusy(true);
             try {
-              const res = await voidExpense(expenseId, reason);
+              const res = await voidExpense(activeGroupId, expenseId, reason);
               setState(res.state);
-              showToast(
-                'success',
-                'Expense marked VOIDED and preserved in audit history.',
-              );
+              showToast('success', 'Bill marked as removed.');
             } finally {
               setBusy(false);
             }

@@ -1,21 +1,21 @@
 @import "tailwindcss";
 
-@custom-variant dark (&:where(.dark, .dark *));
-
 @layer base {
   :root {
-    --bg-canvas: #090d16;
-    --bg-surface: #0f172a;
-    --bg-elevated: #131c2e;
-    --border-hairline: #1e293b;
-    --accent-primary: #10b981;
+    --bg-canvas: #e5f3ee;
+    --bg-mint: #effbf5;
+    --bg-lilac: #f4f0fd;
+    --accent-primary: #059669;
+    --accent-violet: #7c3aed;
   }
 
   html {
     font-family: "DM Sans", system-ui, -apple-system, sans-serif;
-    background-color: #090d16;
-    color: #f1f5f9;
-    color-scheme: dark;
+    background: linear-gradient(155deg, #dcf1e9 0%, #e9edf7 50%, #ede6fa 100%);
+    background-attachment: fixed;
+    color: #0f172a;
+    color-scheme: light;
+    overscroll-behavior-x: none;
   }
 
   h1, h2, h3, h4, .font-display {
@@ -29,6 +29,39 @@
   }
 }
 
+@keyframes logo-orbit {
+  0% {
+    transform: rotate(0deg) scale(0.96);
+  }
+  50% {
+    transform: rotate(180deg) scale(1.03);
+  }
+  100% {
+    transform: rotate(360deg) scale(0.96);
+  }
+}
+
+@keyframes logo-pulse-soft {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 0.92;
+  }
+  50% {
+    transform: scale(1.06);
+    opacity: 1;
+  }
+}
+
+.animate-logo-orbit {
+  animation: logo-orbit 14s linear infinite;
+  transform-origin: center;
+}
+
+.animate-logo-core {
+  animation: logo-pulse-soft 3.4s cubic-bezier(0.16, 1, 0.3, 1) infinite;
+  transform-origin: center;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
@@ -40,4 +73,13 @@
 
 .pb-safe {
   padding-bottom: max(0.5rem, env(safe-area-inset-bottom));
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
 }
