@@ -1,3 +1,9 @@
+<img width="371" height="666" alt="image" src="https://github.com/user-attachments/assets/68b13eb5-cdeb-4275-90e2-5acfbc54f9e0" />
+
+
+
+
+
 # FairShare Ledger
 
 A mobile-first roommate and group expense tracker built around exact `PKR` accounting, multi-group switching, horizontal swipe navigation, shareable invite codes for unregistered friends, confirmation-gated partial payments, and a clear activity log.
